@@ -1,5 +1,18 @@
+variable "subscription_id" {
+  description = "Your Azure Subscription ID. Find it by running: az account show --query id -o tsv"
+  type        = string
+  # No default — you must fill this in. Prevents Terraform from silently
+  # deploying into the wrong subscription if you have more than one.
+}
+
+variable "create_resource_group" {
+  description = "Set to true to create a new resource group. Set to false to use an existing one."
+  type        = bool
+  default     = true
+}
+
 variable "resource_group_name" {
-  description = "Name of the Azure resource group"
+  description = "Name of the Azure resource group. Created fresh if create_resource_group = true. Must already exist if create_resource_group = false."
   type        = string
   default     = "nebius-portal-rg"
 }
@@ -7,7 +20,7 @@ variable "resource_group_name" {
 variable "location" {
   description = "Azure region to deploy into"
   type        = string
-  default     = "uaenorth"
+  default     = "uksouth"
   # Other options: "eastus", "westeurope", "uaenorth" (UAE North, closest to Abu Dhabi)
 }
 

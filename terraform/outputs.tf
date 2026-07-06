@@ -18,7 +18,7 @@ output "ssh_command" {
 
 output "resource_group_name" {
   description = "Resource group name — needed for az CLI commands"
-  value       = azurerm_resource_group.main.name
+  value       = local.resource_group.name
 }
 
 output "vm_name" {

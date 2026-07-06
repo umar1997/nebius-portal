@@ -11,19 +11,38 @@ terraform {
 
 provider "azurerm" {
   features {}
-  # Terraform will use your existing `az login` session.
-  # No credentials needed here if you've run `az login` already.
+
+  # This locks Terraform to a specific subscription.
+  # Find your subscription ID by running: az account show --query id -o tsv
+  # If you have multiple subscriptions, this prevents deploying into the wrong one.
+  subscription_id = var.subscription_id
 }
 
 # -----------------------------------------------------------------------------
 # Resource Group
-# One container that holds all the resources below.
-# Delete the resource group and everything inside it is gone.
+# Two options:
+#   create_resource_group = true  → Terraform creates a new resource group
+#   create_resource_group = false → Terraform uses an existing one you already have
 # -----------------------------------------------------------------------------
-resource "azurerm_resource_group" "main" {
+
+# Used when create_resource_group = true
+resource "azurerm_resource_group" "new" {
+  count    = var.create_resource_group ? 1 : 0
   name     = var.resource_group_name
   location = var.location
   tags     = var.tags
+}
+
+# Used when create_resource_group = false (looks up your existing resource group)
+data "azurerm_resource_group" "existing" {
+  count = var.create_resource_group ? 0 : 1
+  name  = var.resource_group_name
+}
+
+# This local value picks whichever resource group is active (new or existing).
+# Everything below uses local.resource_group — you don't need to change anything else.
+locals {
+  resource_group = var.create_resource_group ? azurerm_resource_group.new[0] : data.azurerm_resource_group.existing[0]
 }
 
 # -----------------------------------------------------------------------------
@@ -32,15 +51,15 @@ resource "azurerm_resource_group" "main" {
 # -----------------------------------------------------------------------------
 resource "azurerm_virtual_network" "main" {
   name                = "${var.vm_name}-vnet"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+  location            = local.resource_group.location
+  resource_group_name = local.resource_group.name
   address_space       = ["10.0.0.0/16"]
   tags                = var.tags
 }
 
 resource "azurerm_subnet" "main" {
   name                 = "${var.vm_name}-subnet"
-  resource_group_name  = azurerm_resource_group.main.name
+  resource_group_name  = local.resource_group.name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = ["10.0.1.0/24"]
 }
@@ -53,8 +72,8 @@ resource "azurerm_subnet" "main" {
 # -----------------------------------------------------------------------------
 resource "azurerm_network_security_group" "main" {
   name                = "${var.vm_name}-nsg"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+  location            = local.resource_group.location
+  resource_group_name = local.resource_group.name
   tags                = var.tags
 
   # SSH — for you to manage the VM
@@ -106,8 +125,8 @@ resource "azurerm_network_security_group" "main" {
 # -----------------------------------------------------------------------------
 resource "azurerm_public_ip" "main" {
   name                = "${var.vm_name}-pip"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+  location            = local.resource_group.location
+  resource_group_name = local.resource_group.name
   allocation_method   = "Static"
   sku                 = "Standard"
 
@@ -124,8 +143,8 @@ resource "azurerm_public_ip" "main" {
 # -----------------------------------------------------------------------------
 resource "azurerm_network_interface" "main" {
   name                = "${var.vm_name}-nic"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+  location            = local.resource_group.location
+  resource_group_name = local.resource_group.name
   tags                = var.tags
 
   ip_configuration {
@@ -159,8 +178,8 @@ resource "azurerm_network_interface_security_group_association" "main" {
 # -----------------------------------------------------------------------------
 resource "azurerm_linux_virtual_machine" "main" {
   name                = var.vm_name
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+  location            = local.resource_group.location
+  resource_group_name = local.resource_group.name
   size                = var.vm_size
   admin_username      = var.admin_username
   tags                = var.tags

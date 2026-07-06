@@ -1,0 +1,16 @@
+.claude/
+
+# Secrets
+.env
+
+# Mac OS
+.DS_Store
+
+# Terraform
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/tfplan
+terraform/tf-outputs/
+terraform/terraform.lock.hcl

@@ -1,7 +1,7 @@
 # nebius-portal
 
-An internal web portal for your team to find and open applications running on
-Nebius worker nodes. No SSH, no remembering ports. Open the portal, click a tile,
+Internal web portal for finding and opening applications running on Nebius
+worker nodes. No SSH, no remembering ports. Open the portal, click a tile,
 the app opens.
 
 ---
@@ -9,26 +9,61 @@ the app opens.
 ## How it works
 
 ```
-Browser (team member)
-        │
-        │  HTTPS — must sign in with work account
-        ▼
-  Azure VM  (nginx + oauth2-proxy)
-        │
-        │  direct internal connection
-        ▼
-  Nebius worker-0  (nginx)
-        ├──► app on port 8001  (this node)
-        ├──► app on port 8002  (this node)
-        └──► worker-1:9001     (another node, Nebius internal network)
+Browser → Azure VM nginx → Node.js backend → SOCKS5 tunnel → Nebius worker:PORT
 ```
 
-The **Azure VM** is a thin front door — it handles login and passes traffic
-through. The **worker node** does everything else: serves the portal UI, manages
-the app list, and routes to the right app.
+The Azure VM runs three things:
+1. **nginx** — serves the React portal and routes traffic to the backend
+2. **Node.js backend** — manages the app list in SQLite and proxies app requests
+   through the SOCKS5 tunnel
+3. **autossh** — holds a permanent SOCKS5 tunnel (port 1080) to the Nebius login
+   node, which forwards traffic to any worker node on the internal network
 
-The worker node can reach other Nebius nodes over the internal network, so adding
-an app on another node works the same as adding one on worker-0.
+Adding a new app is a form submission. No tunnel restarts, no config file edits.
+
+---
+
+## Infrastructure
+
+| Resource | Detail |
+|----------|--------|
+| Azure VM | `nebius-portal-vm`, UAE North, Standard_B2s |
+| Nebius login node | `89.169.98.29`, SSH alias `nebius-networking` |
+| SOCKS5 tunnel | autossh `-D 1080`, runs as systemd service `nebius-tunnel` |
+| Worker nodes | worker-0 through worker-7 (see IPs in PROJ_SPEC.md) |
+
+### SSH aliases on the Azure VM (`~/.ssh/config`)
+
+```
+Host nebius-networking
+    HostName 89.169.98.29
+    User networking
+    IdentityFile ~/.ssh/nebius_id_rsa
+
+Host worker-0
+    HostName 10.62.40.79
+
+Host worker-1
+    HostName 10.62.8.22
+
+Host worker-2
+    HostName 10.62.12.71
+
+Host worker-3
+    HostName 10.62.134.28
+
+Host worker-4
+    HostName 10.62.5.94
+
+Host worker-5
+    HostName 10.62.115.41
+
+Host worker-6
+    HostName 10.62.26.144
+
+Host worker-7
+    HostName 10.62.116.171
+```
 
 ---
 
@@ -36,258 +71,76 @@ an app on another node works the same as adding one on worker-0.
 
 ```
 nebius-portal/
-├── frontend/               # React portal UI (Vite + TypeScript + Tailwind)
+├── __docs__/
+│   ├── PROJ_SPEC.md
+│   ├── PLAN.md
+│   └── README.md
+├── frontend/               # React + Vite + TypeScript + Tailwind
 │   ├── src/
-│   │   ├── components/     # AppGrid, AppTile, AddAppModal, StatusDot, ...
+│   │   ├── components/
+│   │   │   ├── AppGrid.tsx
+│   │   │   ├── AppTile.tsx
+│   │   │   ├── AddAppModal.tsx
+│   │   │   └── StatusDot.tsx
 │   │   ├── api/            # calls to /api/apps
 │   │   └── App.tsx
 │   └── vite.config.ts
-├── backend/                # Node.js + Express — app list API
+├── backend/                # Node.js + Express
 │   ├── src/
-│   │   ├── index.ts        # starts the server
-│   │   ├── routes/apps.ts  # GET/POST/PUT/DELETE /api/apps
-│   │   ├── resolve.ts      # /internal/resolve/:id/:path (dynamic proxy)
-│   │   ├── db.ts           # SQLite setup
-│   │   └── allowlist.ts    # permitted hosts check
+│   │   ├── index.ts
+│   │   ├── routes/apps.ts
+│   │   ├── proxy.ts        # SOCKS5 proxy handler
+│   │   ├── db.ts           # SQLite
+│   │   └── allowlist.ts
+│   ├── .env.example
 │   └── package.json
 ├── nginx/
-│   ├── worker.conf         # nginx config for the Nebius worker node
-│   └── vm.conf             # nginx config for the Azure VM
+│   └── nebius-portal.conf  # nginx config for the Azure VM
+├── terraform/              # Azure VM provisioning
 └── README.md
 ```
 
 ---
 
-## The one thing every app must have configured
+## The one thing every Nebius app must have
 
-When an app is shown under `/app/something/`, the app must know it lives at that
-path or it loads broken (no styling, dead buttons). You fix this once per app:
+When an app is shown under `/app/{id}/`, the app must know it lives at that path
+or it renders with broken styling and dead buttons.
 
 ### Gradio apps
 ```python
 demo.launch(
     server_name="0.0.0.0",
     server_port=8001,
-    root_path="/app/<your-app-id>",   # shown in the portal after you add the app
+    root_path="/app/{id}",   # shown in the portal after you add the app
 )
 ```
 
-### React apps
+### React apps (Vite)
 ```ts
 // vite.config.ts
 export default defineConfig({
-  base: '/app/<your-app-id>/',
+  base: '/app/{id}/',
 })
 ```
 ```tsx
 // if using React Router
-<BrowserRouter basename="/app/<your-app-id>">
+<BrowserRouter basename="/app/{id}">
 ```
 
-Keep a record of every app's ID and its corresponding `root_path`/`base` value.
-The portal shows the exact value to copy after you save a new app.
+The portal shows the exact value to copy after you save a new app. Apply it on
+the Nebius worker and restart the app. One time, per app.
 
 ---
 
-## Setting up the worker node
+## Adding a new app
 
-### 1. Install dependencies
-
-```bash
-# nginx
-sudo apt update && sudo apt install -y nginx
-
-# Node.js (LTS)
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# pm2 (keeps the backend running)
-sudo npm install -g pm2
-
-# SQLite
-sudo apt install -y sqlite3
-```
-
-### 2. Configure nginx on the worker
-
-Copy `nginx/worker.conf` to `/etc/nginx/sites-available/nebius-portal` and
-symlink it:
-
-```bash
-sudo ln -s /etc/nginx/sites-available/nebius-portal \
-           /etc/nginx/sites-enabled/nebius-portal
-sudo nginx -t        # check for errors
-sudo systemctl reload nginx
-```
-
-The config does three things:
-- Serves the built React app from `/var/www/nebius-portal/`
-- Proxies `/api/` to the Node.js backend on `localhost:3001`
-- Proxies `/app/:id/` dynamically through the Node.js resolver
-
-```nginx
-# nginx/worker.conf
-server {
-    listen 8080;
-
-    # Serve the React portal
-    root /var/www/nebius-portal;
-    index index.html;
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # App list API
-    location /api/ {
-        proxy_pass http://localhost:3001/api/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Dynamic app routing — the Node backend resolves ID to host:port
-    location ~ ^/app/([^/]+)(/.*)?$ {
-        proxy_pass http://localhost:3001/internal/resolve/$1$2$is_args$args;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 600s;
-    }
-}
-```
-
-### 3. Run the backend
-
-```bash
-cd /opt/nebius-portal/backend
-npm install
-cp .env.example .env    # fill in the values (see Environment variables below)
-pm2 start dist/index.js --name nebius-portal-api
-pm2 save                # remember this process across reboots
-pm2 startup             # set pm2 to start on boot (follow the printed command)
-```
-
-### 4. Deploy the frontend
-
-```bash
-# On your development machine:
-cd frontend
-npm install
-npm run build           # produces frontend/dist/
-
-# Copy to the worker:
-scp -r dist/* msalman@<worker-ip>:/var/www/nebius-portal/
-```
-
----
-
-## Setting up the Azure VM
-
-### 1. Install nginx
-
-```bash
-sudo apt update && sudo apt install -y nginx
-```
-
-### 2. Configure nginx on the VM
-
-Copy `nginx/vm.conf` to `/etc/nginx/sites-available/nebius-portal`:
-
-```nginx
-# nginx/vm.conf
-server {
-    listen 80;
-
-    location / {
-        proxy_pass http://<worker-ip>:8080/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 600s;
-    }
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/nebius-portal \
-           /etc/nginx/sites-enabled/nebius-portal
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### 3. Open the firewall
-
-In the Azure portal, go to your VM → Networking → Add inbound port rules for
-port 80 and port 443.
-
-### 4. Add HTTPS (free certificate)
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-
-# First, set up a DNS label for your VM in the Azure portal:
-# VM → Overview → DNS name → Configure → add a label
-# You get a free address like: myportal.uksouth.cloudapp.azure.com
-
-sudo certbot --nginx -d myportal.uksouth.cloudapp.azure.com
-```
-
-Certbot updates the nginx config automatically and sets up auto-renewal.
-
-### 5. Add login (Microsoft work account)
-
-Install `oauth2-proxy` to require sign-in before the portal loads:
-
-```bash
-# Download oauth2-proxy (check https://github.com/oauth2-proxy/oauth2-proxy/releases
-# for the latest version)
-wget https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v7.6.0/\
-oauth2-proxy-v7.6.0.linux-amd64.tar.gz
-tar xf oauth2-proxy-*.tar.gz
-sudo mv oauth2-proxy-*/oauth2-proxy /usr/local/bin/
-
-# Register an app in Azure Entra ID (takes ~10 min in the Azure portal):
-# Azure Active Directory → App registrations → New registration
-# Redirect URI: https://<your-dns-name>/oauth2/callback
-# After registering, note: Application (client) ID, Directory (tenant) ID
-# Create a client secret under Certificates & Secrets
-
-# Create the config file
-sudo tee /etc/oauth2-proxy.cfg <<EOF
-provider = "azure"
-azure_tenant = "<your-tenant-id>"
-client_id = "<your-client-id>"
-client_secret = "<your-client-secret>"
-redirect_url = "https://<your-dns-name>/oauth2/callback"
-oidc_issuer_url = "https://login.microsoftonline.com/<your-tenant-id>/v2.0"
-upstreams = ["http://localhost:8080/"]
-email_domains = ["<your-org-domain.com>"]
-cookie_secret = "<32-random-characters>"  # generate: openssl rand -base64 32
-http_address = "0.0.0.0:4180"
-EOF
-
-# Run as a service
-sudo tee /etc/systemd/system/oauth2-proxy.service <<EOF
-[Unit]
-Description=oauth2-proxy
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/oauth2-proxy --config=/etc/oauth2-proxy.cfg
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl enable --now oauth2-proxy
-```
-
-Then update nginx on the VM to pass requests through oauth2-proxy instead of
-directly to the worker. The `nginx/vm.conf` in the repo includes the full
-oauth2-proxy integration block.
+1. Click **Add app** in the portal
+2. Fill in: Name, Host (worker-0 through worker-7), Port, Type, Description
+3. Save — tile appears immediately for everyone
+4. Copy the `root_path`/`base` value shown in the confirmation banner
+5. SSH into the worker and apply that value to the app, then restart it
+6. Refresh the portal — the app loads correctly
 
 ---
 
@@ -297,58 +150,103 @@ oauth2-proxy integration block.
 PORT=3001
 DB_PATH=/opt/nebius-portal/backend/data/apps.db
 
-# Comma-separated list of hosts the portal is allowed to proxy to.
-# Any host not on this list is rejected when a user tries to add an app.
-ALLOWED_HOSTS="worker-0,10.0.0.5,172.16.0.10"
+# socks5h:// = remote DNS (the h matters — worker-0 resolves on the login node)
+# Do NOT use socks5:// — worker hostnames don't resolve on the Azure VM
+SOCKS_PROXY=socks5h://localhost:1080
 
-# Optional: shown as the default host in the Add App form
-DEFAULT_WORKER_HOST="worker-0"
+# Hosts users are allowed to add. Any other host is rejected.
+ALLOWED_HOSTS=worker-0,worker-1,worker-2,worker-3,worker-4,worker-5,worker-6,worker-7
 ```
 
 ---
 
-## API reference
+## API
 
-| Method | Path | What it does |
-|--------|------|-------------|
+| Method | Path | Purpose |
+|--------|------|---------|
 | `GET` | `/api/apps` | List all apps |
 | `POST` | `/api/apps` | Add an app |
 | `PUT` | `/api/apps/:id` | Edit an app |
 | `DELETE` | `/api/apps/:id` | Remove an app |
-| `GET` | `/api/apps/:id/health` | Check if app host:port is reachable |
-| `ANY` | `/internal/resolve/:id/*` | Internal — resolves app ID to host:port and proxies |
+| `GET` | `/api/apps/:id/health` | Check reachability via tunnel |
+| `ANY` | `/app/:id/*` | Proxy to worker:port via SOCKS5 tunnel |
 
 ---
 
-## Adding an app (what a team member does)
+## Deploying the frontend
 
-1. Click **Add app** in the portal
-2. Fill in: Name, Host (e.g. `worker-0` or `172.16.0.12`), Port (e.g. `8001`),
-   Type (React / Gradio / Other), Description (optional)
-3. Click Save — the tile appears immediately for everyone
-4. Copy the `root_path`/`base` value shown in the confirmation and set it in
-   the backend app (see "The one thing every app must have configured" above)
-
----
-
-## Updating the portal
-
-### Update the frontend
 ```bash
 # On your dev machine
-cd frontend && npm run build
-scp -r dist/* msalman@<worker-ip>:/var/www/nebius-portal/
-```
-
-### Update the backend
-```bash
-# On the worker node
-cd /opt/nebius-portal/backend
-git pull
+cd frontend
 npm install
 npm run build
-pm2 restart nebius-portal-api
+
+# Deploy to the VM
+scp -r dist/* azure-nebius-portal-vm:/var/www/nebius-portal/
 ```
+
+---
+
+## Managing the backend on the VM
+
+```bash
+# View logs
+pm2 logs nebius-portal-api
+
+# Restart after a code change
+pm2 restart nebius-portal-api
+
+# Check status
+pm2 status
+```
+
+---
+
+## Managing the tunnel
+
+```bash
+# Check tunnel is running
+sudo systemctl status nebius-tunnel
+
+# View tunnel logs
+journalctl -u nebius-tunnel -f
+
+# Restart tunnel (rarely needed — autossh handles drops automatically)
+sudo systemctl restart nebius-tunnel
+
+# Verify SOCKS proxy is listening
+nc -zv localhost 1080
+
+# Test a specific worker through the tunnel (use worker hostname, not IP)
+curl --socks5h localhost:1080 http://worker-0:8001
+```
+
+---
+
+## Adding a new worker node
+
+When a new worker node is added to Nebius:
+
+1. Get its IP from the login node:
+   ```bash
+   ssh nebius-networking "getent hosts worker-8"
+   ```
+
+2. Add it to `~/.ssh/config` on the Azure VM:
+   ```
+   Host worker-8
+       HostName <ip>
+   ```
+
+3. Add `worker-8` to `ALLOWED_HOSTS` in the backend `.env`
+
+4. Restart the backend:
+   ```bash
+   pm2 restart nebius-portal-api
+   ```
+
+The tunnel does **not** need to be restarted — SOCKS5 covers all hosts
+automatically.
 
 ---
 
@@ -356,10 +254,18 @@ pm2 restart nebius-portal-api
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| App opens but looks broken / unstyled | `root_path` or `base` not set | Set it in the app itself — see the section above |
-| Gradio loads but doesn't respond | WebSocket not forwarding | Check the `Upgrade` / `Connection` headers in nginx config |
-| Grey status dot on a tile | Worker can't reach that host:port | Check the host and port values, and that the app is actually running |
-| "Host not allowed" when adding an app | Host not in `ALLOWED_HOSTS` | Add it to `.env` and restart the backend with `pm2 restart nebius-portal-api` |
-| Portal loads on VM but team can't access it | Firewall blocking port 80/443 | Check Azure Network Security Group — add inbound rules for 80 and 443 |
-| Portal works but login page never appears | oauth2-proxy not running | `sudo systemctl status oauth2-proxy` — check the logs |
-| App list gone after worker restart | pm2 not set to autostart | Run `pm2 startup` and follow the printed command, then `pm2 save` |
+| App loads but looks broken | `root_path`/`base` not set on the Nebius app | Set it on the worker — see above |
+| Gradio loads but doesn't respond | WebSocket not forwarding | Check `Upgrade` header is passed in nginx and Node.js proxy |
+| `worker-0` hostname not resolving | Using `socks5://` not `socks5h://` | Fix `SOCKS_PROXY` in `.env` — the `h` is not optional |
+| Tunnel down, apps unreachable | autossh service crashed | `sudo systemctl restart nebius-tunnel` |
+| App list empty after VM restart | pm2 not set to autostart | `pm2 startup` → follow printed command → `pm2 save` |
+| New app returns 502 | App not running on that port | SSH to worker, confirm app is running |
+| Port 1080 connection refused | Tunnel not running | `sudo systemctl start nebius-tunnel` |
+
+---
+
+## Terraform (VM provisioning)
+
+The `terraform/` directory provisions the Azure VM from scratch.
+See `terraform/README.md` for instructions.
+All infrastructure is tagged `project=nebius-portal` in Azure.

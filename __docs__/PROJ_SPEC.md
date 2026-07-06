@@ -1,160 +1,161 @@
 # PROJ_SPEC — Nebius Portal
-
-**Version:** 2.0 (final architecture)
+**Version:** 3.0 (final — confirmed architecture)
 **Repo:** `nebius-portal`
 
 ---
 
 ## 1. What this is
 
-A web portal that gives your internal team one place to find and open all the
-applications running on your Nebius worker nodes. It looks like a grid of tiles —
-one tile per app. Click a tile, the app opens in a new tab. Authorised users can
-also add, edit, or remove apps directly from the UI without touching any config
-files or restarting anything.
-
-Nobody on the team needs to SSH into anything or remember port numbers.
+A web portal hosted on an Azure VM that gives the internal team one place to find
+and open all applications running on Nebius worker nodes. Apps appear as tiles in
+a grid. Click a tile, the app opens in a new tab. Authorised users can add new apps
+through a form in the UI — no config files, no restarts, no SSH required.
 
 ---
 
-## 2. How it works (plain English)
+## 2. Confirmed infrastructure (do not re-litigate)
+
+| Piece | Detail | Status |
+|-------|--------|--------|
+| Azure VM | `nebius-portal-vm`, UAE North, Standard_B2s | ✅ Running |
+| SOCKS5 tunnel | `autossh -D 1080` via `nebius-networking` alias | ✅ Running as systemd service |
+| Login node | `89.169.98.29`, SSH alias `nebius-networking` | ✅ Reachable |
+| Worker nodes | 8 nodes, worker-0 through worker-7 (see IPs below) | ✅ Confirmed |
+| Test app | `worker-0:8001` — React app, HTML confirmed via tunnel | ✅ Proven |
+
+### Worker node IPs
+> ⚠️ These are Kubernetes pod IPs and may change if pods restart.
+> The Node.js backend must use remote DNS resolution through the SOCKS proxy
+> (resolving `worker-0` on the login node) rather than these IPs directly.
+> IPs listed for reference only.
+
+| Node | IP |
+|------|----|
+| worker-0 | 10.62.40.79 |
+| worker-1 | 10.62.8.22 |
+| worker-2 | 10.62.12.71 |
+| worker-3 | 10.62.134.28 |
+| worker-4 | 10.62.5.94 |
+| worker-5 | 10.62.115.41 |
+| worker-6 | 10.62.26.144 |
+| worker-7 | 10.62.116.171 |
+
+---
+
+## 3. Architecture
 
 ```
 Team member's browser
-        │  (HTTPS, must sign in)
+        │
+        │ HTTPS (port 443)
         ▼
-┌─────────────────────┐
-│   Azure VM          │  ← the public front door, handles login
-│   (nginx)           │
-└────────┬────────────┘
-         │  direct network connection (confirmed)
-         ▼
-┌─────────────────────────────────────────────────┐
-│   Nebius worker-0                               │
-│                                                 │
-│   nginx                                         │
-│    ├── serves the React grid UI                 │
-│    ├── /api/*  → Node.js (manages app list)     │
-│    ├── /app/X  → app on port 8001 (this node)   │
-│    ├── /app/Y  → app on port 8002 (this node)   │
-│    └── /app/Z  → worker-1:9001  (other node,    │
-│                   internal Nebius network)       │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│  Azure VM (nebius-portal-vm)                │
+│                                             │
+│  nginx                                      │
+│   ├── /          → React portal (static)    │
+│   ├── /api/      → Node.js backend :3001    │
+│   └── /app/      → Node.js backend :3001    │
+│                                             │
+│  Node.js backend                            │
+│   ├── SQLite     (app list, persistent)     │
+│   └── socks-proxy-agent → localhost:1080    │
+│                          (remote DNS)       │
+│                                             │
+│  autossh -D 1080  (SOCKS5 tunnel)           │
+└──────────────────────┬──────────────────────┘
+                       │ SSH port 22
+                       ▼
+              Nebius login node (89.169.98.29)
+                       │
+                       │ Nebius internal network
+              ┌────────┴────────┐
+              ▼                 ▼
+        worker-0:8001     worker-0:8888
+        worker-1:XXXX     worker-2:XXXX  ...etc
 ```
 
-**The Azure VM** is a thin front door. Its only jobs are: require login, accept
-HTTPS from the team, and forward everything to the worker node. It does not run
-any app logic.
+**Why SOCKS5 instead of per-port `-L` forwarding:**
+One tunnel covers all 10+ apps and every future app added through the UI.
+Per-port forwarding (`-L 8001:... -L 8888:...`) requires editing the systemd
+service and restarting the tunnel every time an app is added. SOCKS5 eliminates
+this entirely — adding an app is a database write, nothing else.
 
-**The worker node** does all the real work. nginx on the worker serves the
-React portal UI, and routes each `/app/X` request to the right port — whether that
-app is on this worker or another one on Nebius's internal network.
-
-**Why the worker node does the routing:** the worker can reach every other Nebius
-node over the internal network. The Azure VM cannot — it only has a path to
-worker-0. So putting the routing logic on worker-0 means any app on any node can
-be reached through one single connection.
+**Why remote DNS resolution matters:**
+Worker nodes are Kubernetes pods. Their IPs can change on restart.
+Using `worker-0` as a hostname resolved by the login node (which has internal
+Nebius DNS) is resilient to IP changes. Using raw IPs is not.
 
 ---
 
-## 3. The two pieces of infrastructure
+## 4. How adding an app works (end to end)
 
-### Azure VM
-- Small Linux VM (Ubuntu, B1s or B2s tier — roughly £8–20/month)
-- Runs nginx as a reverse proxy
-- Runs `oauth2-proxy` in front of nginx to enforce Microsoft Entra ID (work
-  account) login — only people in your organisation can sign in
-- Has a direct network connection to the Nebius worker node (confirmed)
-- This is the only thing exposed to the public internet
+1. User opens the portal and clicks **Add app**
+2. Fills in: name, worker host (e.g. `worker-0`), port, type, description
+3. Hits save → `POST /api/apps` → row written to SQLite
+4. Tile appears immediately in the grid for all users
+5. Portal shows a banner: **"Set `root_path="/app/{id}"` in your app on Nebius
+   before it will render correctly"**
+6. Someone SSH-es into the worker and adds that one line to the app
+7. App works through the portal
 
-### Nebius worker-0
-- Already exists — your existing worker node
-- nginx installed and configured as the internal router
-- A small Node.js backend running on a local port (manages the app list)
-- A SQLite database file storing the app list (simple, no external service needed,
-  survives restarts because it's a real file on a real disk — not a container)
-- The React portal app, built and placed in nginx's web root
+Step 6 cannot be automated without the portal SSH-ing into Nebius and editing
+files — more complexity than it's worth. The form makes the required value
+explicit so the manual step is fast and unambiguous.
 
 ---
 
-## 4. What the portal does
+## 5. The broken-page requirement (non-negotiable)
 
-### Grid view
-- Shows all registered apps as tiles
-- Each tile: app name, short description, type badge (React / Gradio / Other),
-  status dot (green = reachable, grey = not responding)
-- Clicking a tile opens the app in a new tab
+Every app shown under `/app/{id}/` must be told it lives at that path or it
+renders broken — no styling, dead buttons. This is a one-line fix per app:
 
-### Add / edit / remove apps
-- A form lets authorised users add an app: name, host (worker hostname or IP),
-  port, type, description
-- The app immediately appears as a tile for everyone
-- Apps can be edited or removed from a per-tile menu
-- The host entered is checked against a server-side allowlist — you cannot point
-  the portal at arbitrary addresses on the internet
+**Gradio:**
+```python
+demo.launch(root_path="/app/{id}")
+```
 
-### Proxy routing
-- Each app gets a path: `/app/{id}/`
-- nginx on the worker forwards that path to `http://{host}:{port}/`
-- Both normal web requests and live (WebSocket) connections are forwarded —
-  required for Gradio to work
+**React (Vite):**
+```ts
+// vite.config.ts
+export default defineConfig({ base: '/app/{id}/' })
+```
+```tsx
+<BrowserRouter basename="/app/{id}">
+```
 
-### The "broken page" fix
-When an app is shown under `/app/something/`, it must be told it lives there or
-its styling and buttons break. Because you own these apps:
-
-- **Gradio apps:** add `root_path="/app/{id}"` to the `launch()` call
-- **React apps:** set `base: '/app/{id}/'` in `vite.config.ts` and `basename`
-  on the router
-
-This is a one-line change per app, done once. The portal shows the exact value
-to use after you add an app.
+The portal shows the exact value after saving a new app. The developer who
+adds the app to Nebius applies it once. It never needs to change unless the
+app is removed and re-added with a different ID.
 
 ---
 
-## 5. Users and access
+## 6. Technology
 
-- Everyone signs in with their work Microsoft account (Entra ID)
-- One shared app list, visible and editable by all signed-in users
-- No separate Viewer/Editor roles in v1 (can be added later with minimal changes)
-
----
-
-## 6. Technology choices
-
-| Piece | Technology | Why |
-|-------|-----------|-----|
-| Portal UI | React + Vite + TypeScript | Fast, typed, base-path config is one line |
-| UI styling | Tailwind CSS | Clean, professional, no heavy framework |
-| Backend (app list API) | Node.js + Express | Simple, same language ecosystem as frontend |
-| App list storage | SQLite (file on worker disk) | No external service, survives restarts, zero cost |
-| Internal proxy | nginx on worker-0 | You already have it; handles WebSockets; proven in your Apache config |
-| Public front door | nginx on Azure VM | Thin passthrough, easy to configure |
-| Login / auth | oauth2-proxy + Microsoft Entra ID | One sidecar process, no custom auth code |
+| Layer | Choice |
+|-------|--------|
+| Frontend | React + Vite + TypeScript + Tailwind CSS |
+| Backend | Node.js + Express |
+| Proxy | `socks-proxy-agent` (remote DNS via SOCKS5 tunnel) |
+| App list | SQLite on the Azure VM disk |
+| Tunnel | autossh `-D 1080` as a systemd service |
+| Web server | nginx on the Azure VM |
+| Auth | oauth2-proxy + Microsoft Entra ID (Phase 6) |
 
 ---
 
-## 7. What is deliberately NOT in v1
+## 7. What is out of scope for v1
 
-- Custom domain name (the portal uses the VM's public IP or Azure DNS name)
-- Apps embedded inside the portal page (new tab only — avoids the broken-page
-  problem entirely for apps you don't control)
-- Opening apps directly from the browser to the worker (not needed — everything
-  routes through the VM → worker path)
+- Automating `root_path` / `base` changes on Nebius apps
+- Embedding apps inside the portal (new tab only)
 - Per-app permissions
-- Audit logs / usage analytics
+- Audit logs
 
 ---
 
-## 8. Open questions (decide before build starts)
+## 8. Open questions
 
-1. **Auth requirement:** do you have an Azure Entra ID tenant set up for your org,
-   and can you register an app in it? This is needed for the login to work.
-   If not, a simpler username/password approach can be used for v1.
-
-2. **Other worker nodes:** do apps run on other worker nodes beyond worker-0 today,
-   or is everything on worker-0 for now? Affects how much of the multi-node routing
-   needs to be built vs. left for later.
-
-3. **VM already exists?** Do you already have an Azure VM you want to use, or does
-   one need to be created?
+1. **Entra ID tenant** — do you have one set up and can you register an app in it?
+   Needed for oauth2-proxy login. If not, basic auth is the v1 fallback.
+2. **App list ownership** — shared editable list for all signed-in users is the
+   default. Fine for v1?

@@ -1,0 +1,61 @@
+# ============================================================
+# nebius-portal — YOUR VALUES GO HERE
+# ============================================================
+# 1. Copy this file:   cp terraform.tfvars.example terraform.tfvars
+# 2. Fill in the values below
+# 3. Run: terraform init && terraform apply
+# ============================================================
+
+# ------ REQUIRED — you must fill these in ------
+
+# Your Azure Subscription ID
+# Find it by running: az account show --query id -o tsv
+subscription_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# ------ RESOURCE GROUP ------
+
+# true  = Terraform creates a brand new resource group with the name below
+# false = Terraform uses an existing resource group with that name
+create_resource_group = true
+resource_group_name   = "nebius-portal-rg"
+
+# ------ REGION ------
+
+# Where in Azure to deploy everything.
+# uaenorth  = UAE North (closest to Abu Dhabi — recommended for your team)
+# uksouth   = UK South
+# eastus    = East US
+location = "uaenorth"
+
+# ------ VM ------
+
+vm_name        = "nebius-portal-vm"
+admin_username = "azureuser"
+
+# Path to your SSH public key on your local machine.
+# If you're not sure, run: cat ~/.ssh/id_rsa.pub
+# If that file doesn't exist, generate a key with: ssh-keygen -t rsa -b 4096
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+
+# VM size — pick one:
+# Standard_B1s = 1 vCPU, 1GB RAM  (~£7/month)  — fine for low traffic
+# Standard_B2s = 2 vCPU, 4GB RAM  (~£28/month) — recommended
+vm_size = "Standard_B2s"
+
+os_disk_size_gb = 30
+
+# ------ SECURITY ------
+
+# Restrict SSH access to your IP address only (strongly recommended).
+# Find your current IP: https://whatismyip.com
+# Then set it like: "203.0.113.42/32"  (the /32 means exactly that one IP)
+# Leave as "*" only for initial testing — change it before going live.
+allowed_ssh_cidr = "*"
+
+# ------ TAGS ------
+
+tags = {
+  project     = "nebius-portal"
+  environment = "production"
+  managed_by  = "terraform"
+}
