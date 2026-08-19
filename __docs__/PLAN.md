@@ -1,261 +1,220 @@
-# PLAN.md — Build Plan
-**Version:** 3.0 (final — confirmed architecture)
+# PLAN.md - Current Status, Runbook, and Next Work
+
+**Version:** 4.0
+**Updated:** 2026-07-13
+
+This repo has moved past the original phase plan. Use this file as a status
+tracker and practical checklist. The older one-time setup details live in
+`SET_UP.md` and `VM_SET_UP.md`.
 
 ---
 
-## Current state (what is already done)
+## Status table
 
-- ✅ Azure VM created and running (`nebius-portal-vm`, UAE North)
-- ✅ SSH access to VM configured (`azure-nebius-portal-vm` alias)
-- ✅ SSH access to Nebius login node configured (`nebius-networking` alias)
-- ✅ autossh SOCKS5 tunnel running as systemd service on port 1080
-- ✅ Tunnel confirmed working: `curl --socks5 localhost:1080 http://10.62.40.79:8001` returns HTML
-- ✅ All 8 worker node IPs confirmed and added to `~/.ssh/config` on the VM
-- ✅ Terraform scripts for VM provisioning written and committed to repo
-
-**Start at Phase 1. Everything above is done.**
+| Area | Status | Evidence in repo | Notes |
+|---|---|---|---|
+| Azure VM provisioning | Done | `terraform/` | Do not re-provision unless asked |
+| SOCKS5 tunnel | Done | `SET_UP.md`, `VM_SET_UP.md` | Runs as `nebius-tunnel` on VM |
+| Backend API | Done | `backend/src/` | Express + SQLite + TypeScript |
+| App proxy | Done | `backend/src/proxy.ts` | HTTP and WebSocket through SOCKS5 |
+| App CRUD | Done | `backend/src/routes/apps.ts` | Enforces `ALLOWED_HOSTS` |
+| JWT auth | Done | `backend/src/routes/auth.ts` | Signup/login/refresh/logout/me |
+| Admin approval | Done | `backend/src/routes/admin.ts` | Env-backed superadmin |
+| Frontend portal | Done | `frontend/src/` | React/Vite/Tailwind/Zustand |
+| nginx config | Done | `nginx/nebius-portal.conf` | SPA, `/api/`, `/app/` |
+| Deploy helper | Done | `deploy.sh` | Deploy frontend/backend/nginx |
+| HTTPS | Partially documented | `VM_SET_UP.md` | Verify live cert/nginx state before changes |
+| Handover docs | In progress | `__docs__/` | Keep docs synchronized with source |
 
 ---
 
-## Phase 1 — Node.js backend (2–3 days) ← START HERE
+## Current architecture
 
-**Goal:** a backend that stores the app list in SQLite and proxies `/app/{id}/`
-requests through the SOCKS5 tunnel to the right worker and port, with remote DNS
-resolution so worker hostnames (not IPs) are used.
+```text
+Browser
+  -> nginx on Azure VM
+      /        -> static React SPA in /var/www/nebius-portal
+      /api/    -> Node backend on localhost:3001
+      /app/    -> Node backend on localhost:3001
+  -> Node backend
+      SQLite for apps, users, refresh token hashes
+      SocksProxyAgent using socks5h://localhost:1080
+  -> autossh SOCKS5 tunnel
+  -> Nebius worker host and port
+```
 
-### 1.1 Project setup on the Azure VM
+The system depends on remote DNS through `socks5h://`. Worker pod IPs can rotate;
+worker hostnames should remain the app record format.
+
+---
+
+## Current implementation checkpoints
+
+### Backend
+
+Before backend changes:
 
 ```bash
-sudo apt install -y nodejs npm
-sudo npm install -g pm2
-mkdir -p /opt/nebius-portal/backend
-cd /opt/nebius-portal/backend
-npm init -y
-npm install express better-sqlite3 socks-proxy-agent http-proxy-agent \
-            node-http-proxy cors dotenv
-npm install -D typescript @types/express @types/node ts-node
+npm --prefix backend run typecheck
 ```
 
-### 1.2 SQLite schema
+Backend must preserve:
 
-One table:
-```sql
-CREATE TABLE apps (
-  id          TEXT PRIMARY KEY,   -- auto-generated slug, e.g. "abc123"
-  name        TEXT NOT NULL,
-  host        TEXT NOT NULL,      -- e.g. "worker-0"
-  port        INTEGER NOT NULL,
-  type        TEXT NOT NULL,      -- "react" | "gradio" | "other"
-  description TEXT,
-  created_at  TEXT DEFAULT (datetime('now'))
-);
-```
+- `GET /api/health` as a public health check.
+- `requireAuth` on `/api/apps` and `/app/`.
+- `requireAdmin` on admin management routes.
+- SQLite as the persistence layer.
+- `socks5h://localhost:1080` remote DNS behavior.
+- WebSocket upgrade handling for proxied apps such as Gradio.
 
-### 1.3 API endpoints
+### Frontend
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/apps` | List all apps |
-| `POST` | `/api/apps` | Add an app (validate + allowlist) |
-| `PUT` | `/api/apps/:id` | Edit an app |
-| `DELETE` | `/api/apps/:id` | Remove an app |
-| `GET` | `/api/apps/:id/health` | Check if `host:port` responds via tunnel |
-| `ANY` | `/app/:id/*` | Proxy to `host:port` via SOCKS5 (remote DNS) |
-
-### 1.4 The proxy (critical detail)
-
-The proxy must use **remote DNS** — hostname resolution happens on the login node,
-not the Azure VM. This handles the Kubernetes IP-change problem.
-
-```ts
-import { SocksProxyAgent } from 'socks-proxy-agent';
-
-// socks5h:// = remote DNS resolution (h = hostname)
-// socks5://  = local DNS resolution (wrong — worker-0 won't resolve on Azure)
-const agent = new SocksProxyAgent('socks5h://localhost:1080');
-```
-
-The `h` in `socks5h://` is the entire difference between this working reliably
-and breaking every time a pod restarts.
-
-### 1.5 Host allowlist
-
-The POST /api/apps endpoint must reject hosts not in a configured allowlist.
-This stops the portal from being used to probe arbitrary internal addresses.
+Before frontend changes:
 
 ```bash
-# In .env
-ALLOWED_HOSTS=worker-0,worker-1,worker-2,worker-3,worker-4,worker-5,worker-6,worker-7
-SOCKS_PROXY=socks5h://localhost:1080
-PORT=3001
-DB_PATH=/opt/nebius-portal/backend/data/apps.db
+npm --prefix frontend run build
 ```
 
-### 1.6 Run and verify
+Frontend must preserve:
+
+- Public `/login`, `/signup`, and `/admin` routes.
+- Protected `/` app grid with `RequireAuth`.
+- Protected `/admin/dashboard` and `/admin/users` with `RequireAdmin`.
+- Access tokens in Zustand memory.
+- New-tab app opening through `/app/{id}/?token=${accessToken}`.
+
+### nginx
+
+Before nginx deployment:
 
 ```bash
-pm2 start dist/index.js --name nebius-portal-api
-pm2 save
-pm2 startup
-
-# Test
-curl http://localhost:3001/api/apps          # returns []
-curl -X POST http://localhost:3001/api/apps \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Test","host":"worker-0","port":8001,"type":"react"}'
-# Then visit http://localhost:3001/app/{id}/ — should return HTML from worker-0:8001
+./deploy.sh nginx
 ```
 
-**Phase 1 is done when:** `curl http://localhost:3001/app/{id}/` returns the
-same HTML as `curl --socks5 localhost:1080 http://worker-0:8001`.
+`nginx/nebius-portal.conf` must preserve:
+
+- SPA fallback with `try_files $uri $uri/ /index.html`.
+- `/api/` proxy to `http://localhost:3001/api/`.
+- `/app/` proxy to `http://localhost:3001/app/`.
+- WebSocket headers for `/app/`.
+- High read/send timeouts for long-running ML app requests.
 
 ---
 
-## Phase 2 — nginx config on the Azure VM (half a day)
+## Deployment checklist
 
-**Goal:** nginx routes traffic to the Node.js backend so the portal is accessible
-on port 80 (and later 443).
-
-```nginx
-# /etc/nginx/sites-available/nebius-portal
-server {
-    listen 80;
-
-    # Serve the React portal (added in Phase 3)
-    root /var/www/nebius-portal;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # App list API
-    location /api/ {
-        proxy_pass http://localhost:3001/api/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # App proxy — passes to Node.js which routes through SOCKS tunnel
-    location /app/ {
-        proxy_pass http://localhost:3001/app/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 600s;
-    }
-}
-```
+Use the repo-level helper:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/nebius-portal \
-           /etc/nginx/sites-enabled/nebius-portal
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
+./deploy.sh frontend
+./deploy.sh backend
+./deploy.sh nginx
+./deploy.sh
 ```
 
-**Phase 2 is done when:** `curl http://<VM-public-IP>/api/apps` returns JSON
-and `http://<VM-public-IP>/app/{id}/` returns app HTML.
-
----
-
-## Phase 3 — React portal UI (2–3 days)
-
-**Goal:** the grid, tiles, and Add App form — connected to the real API.
-
-Build locally on your dev machine, then deploy the built files to the VM.
-
-### Features
-- Grid of app tiles, loaded from `GET /api/apps`
-- Each tile: name, type badge, description, status dot (green/grey)
-- Click tile → opens `/app/{id}/` in a new tab
-- Per-tile menu: edit, remove (with confirmation)
-- **Add App modal** — fields: name, host (dropdown of worker-0 to worker-7),
-  port, type, description
-- After saving: banner showing exact `root_path`/`base` value to set on Nebius
-- Empty state, loading states, error toasts
-- Responsive grid (2 columns mobile, 3–4 columns desktop)
-
-### Deploy to VM
+After deployment, verify:
 
 ```bash
-# On your dev machine
-cd frontend
-npm run build
-
-# Copy built files to VM
-scp -r dist/* azure-nebius-portal-vm:/var/www/nebius-portal/
+curl -s http://nebius-portal-vm.uaenorth.cloudapp.azure.com/api/health
+ssh azure-nebius-portal-vm "pm2 status"
+ssh azure-nebius-portal-vm "sudo systemctl status nebius-tunnel"
+ssh azure-nebius-portal-vm "curl --socks5h localhost:1080 http://worker-0:8001"
 ```
 
-**Phase 3 is done when:** the full portal loads at the VM's public IP, tiles
-appear, Add App works, and clicking a tile opens the real app.
+If the public health check fails:
+
+1. Check nginx config and status.
+2. Check pm2 process status.
+3. Check backend logs.
+4. Check that backend `.env` exists on the VM.
 
 ---
 
-## Phase 4 — HTTPS + login (1–2 days)
+## Remaining work
 
-### HTTPS (free)
+### 1. Verify live HTTPS state
+
+`VM_SET_UP.md` documents certbot work, but do not assume the current VM state.
+Before changing HTTPS, verify:
 
 ```bash
-# On the Azure VM
-sudo certbot --nginx -d nebius-portal-vm.uaenorth.cloudapp.azure.com
+ssh azure-nebius-portal-vm "sudo nginx -T | grep -n \"server_name\\|listen 443\\|ssl_certificate\""
+ssh azure-nebius-portal-vm "sudo certbot certificates"
+curl -I https://nebius-portal-vm.uaenorth.cloudapp.azure.com/
 ```
 
-### Login (oauth2-proxy + Entra ID)
+Expected outcome: document whether HTTPS is live, partially installed, or still
+pending. Then update `MEMORY.md` and this file.
 
-> Skip this phase if no Entra ID tenant is available — use basic auth as a
-> temporary measure and revisit.
+### 2. Confirm production auth behavior
+
+Exercise the full flow against the deployed portal:
+
+1. Sign up as a new user.
+2. Confirm user appears as pending in admin UI.
+3. Approve the user.
+4. Log in as the approved user.
+5. Add or open a test app.
+6. Confirm `/app/{id}/?token=...` works in a new tab.
+
+Document any gaps in `AUTH_SPEC.md`.
+
+### 3. Decide refresh-token hardening
+
+Current frontend behavior stores user refresh tokens in `localStorage`.
+This works for page reload restoration but has XSS exposure. A stronger design is
+HttpOnly refresh-token cookies, which requires coordinated backend and frontend
+changes.
+
+Do not migrate this casually. If requested, update `AUTH_SPEC.md` first with the
+intended contract.
+
+### 4. Add tests if the project continues growing
+
+There are currently no test scripts in `backend/package.json` or
+`frontend/package.json`. If auth/proxy/app CRUD behavior starts changing often,
+add focused tests before refactoring.
+
+Suggested first tests:
+
+- Backend route tests for auth status handling.
+- Backend validation tests for `ALLOWED_HOSTS`.
+- Token helper tests for refresh-token hashing and verification.
+- Frontend smoke tests for route guards.
+
+### 5. Clean root README if needed
+
+Root `README.md` is currently minimal. Keep detailed docs in `__docs__/`, but add
+a short pointer in root README if the repo will be shared with others.
+
+---
+
+## Known risks
+
+| Risk | Why it matters | Mitigation |
+|---|---|---|
+| Using `socks5://` instead of `socks5h://` | Worker hostnames resolve on wrong machine | Keep `SOCKS_PROXY=socks5h://localhost:1080` |
+| Storing worker pod IPs | Pod IPs can rotate | Store worker hostnames |
+| Missing app `root_path` or Vite `base` | App renders broken under `/app/{id}` | Configure app before opening through portal |
+| nginx WebSocket headers drift | Gradio and similar apps break | Preserve `/app/` upgrade headers |
+| Admin added to DB | Breaks env-only superadmin model | Keep admin auth in env only |
+| Refresh tokens in localStorage | XSS can steal long-lived token | Consider HttpOnly cookie migration |
+| Docs drift from source | VM operations become risky | Update docs in the same task as code changes |
+
+---
+
+## Session start checklist
+
+Run this from repo root before starting work:
 
 ```bash
-# Install oauth2-proxy
-wget https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v7.6.0/\
-oauth2-proxy-v7.6.0.linux-amd64.tar.gz
-tar xf oauth2-proxy-*.tar.gz
-sudo mv oauth2-proxy-*/oauth2-proxy /usr/local/bin/
+pwd
+git status --short
+git diff --stat
+ls -la __docs__ backend frontend nginx terraform
+npm --prefix backend pkg get scripts
+npm --prefix frontend pkg get scripts
 ```
 
-Register an app in Azure Entra ID, set redirect URI to
-`https://<your-dns>/oauth2/callback`, then configure oauth2-proxy to sit
-in front of nginx.
-
-**Phase 4 is done when:** the portal requires a Microsoft sign-in and only
-your org's accounts can get through.
-
----
-
-## Phase 5 — Handover (half a day)
-
-- [ ] Confirm README matches what was built
-- [ ] Document all live apps and their `root_path`/`base` values
-- [ ] Write "how to add a new app" one-pager for the team
-- [ ] Confirm `pm2 startup` is set so backend survives VM reboots
-- [ ] Confirm systemd tunnel service is enabled (`systemctl is-enabled nebius-tunnel`)
-
----
-
-## Timeline
-
-| Phase | Work |
-|-------|------|
-| 1 — Node.js backend + SOCKS proxy | 2–3 days |
-| 2 — nginx config | 0.5 day |
-| 3 — React UI | 2–3 days |
-| 4 — HTTPS + login | 1–2 days |
-| 5 — Handover | 0.5 day |
-| **Total** | **~6–9 working days** |
-
-Phases 0–tunnel setup are already complete — the original estimate was 8–12 days.
-
----
-
-## Things most likely to go wrong
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| `/app/{id}/` returns HTML but app looks broken | `root_path`/`base` not set on Nebius app | Set it on the worker — one line |
-| Gradio loads but doesn't respond | WebSocket not forwarding through proxy | Ensure Node.js proxy forwards `Upgrade` header |
-| `worker-0` doesn't resolve | Using `socks5://` not `socks5h://` | Change to `socks5h://` in `socks-proxy-agent` |
-| App list gone after VM restart | pm2 not configured to autostart | Run `pm2 startup` and follow the printed command |
-| Tunnel drops and doesn't recover | autossh misconfigured | Check `systemctl status nebius-tunnel` and `journalctl -u nebius-tunnel` |
+Then read the specific files you will change. Do not rely on phase labels or old
+summaries without checking current source.

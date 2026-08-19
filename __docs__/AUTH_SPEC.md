@@ -1,41 +1,106 @@
-# AUTH_SPEC.md — Authentication & Admin Approval Flow
+# AUTH_SPEC.md - Authentication & Admin Approval Flow
 
-**Applies to:** nebius-portal backend + frontend
-**Storage:** SQLite (same database as app list — no separate service)
-
----
-
-## What this adds
-
-- Users register → land in `pending` state → cannot use the portal yet
-- Admin logs in via a separate route → sees pending users → approves or rejects
-- Approved users can log in and use the portal normally
-- All `/api/apps` and `/app/` routes require a valid JWT
+**Applies to:** `backend/` and `frontend/`
+**Storage:** SQLite for users and user refresh-token hashes. Admin is env-backed.
+**Status:** Implemented in the current repo.
 
 ---
 
-## Flow
+## Summary
 
+The portal uses local JWT auth with an admin approval flow:
+
+- Users sign up and start as `pending`.
+- Pending or rejected users cannot log in.
+- The admin logs in through a separate admin route using env-backed credentials.
+- The admin can approve, reject, delete, and list users.
+- Approved users can log in and access the portal.
+- `/api/apps` and `/app/` routes require a user JWT.
+- `/api/admin/*` management routes require a superadmin JWT.
+
+There is no database admin user. The admin identity comes from environment
+variables only.
+
+---
+
+## User flow
+
+```text
+Signup at /signup
+  -> POST /api/auth/signup
+  -> users.status = "pending"
+  -> no JWT issued
+
+Admin approves at /admin/users
+  -> PATCH /api/admin/users/:id/approve
+  -> users.status = "approved"
+
+User logs in at /login
+  -> POST /api/auth/login
+  -> accessToken + refreshToken + user profile
+  -> accessToken stored in Zustand memory
+  -> refreshToken currently stored by frontend in localStorage
 ```
-User signs up (/signup)
-      │
-      ▼
-status = pending → cannot log in yet
-      │
-      ▼
-Admin sees pending user at /admin/users
-      │
-      ├── Approve → status = approved → user can now log in
-      └── Reject  → status = rejected → user cannot log in
+
+Rejected users receive `403 Account rejected`. Pending users receive
+`403 Account pending approval`.
+
+---
+
+## Admin flow
+
+```text
+Admin login at /admin
+  -> POST /api/admin/login
+  -> compare email to ADMIN_EMAIL
+  -> compare password to ADMIN_PASSWORD_HASH with bcrypt
+  -> issue accessToken + refreshToken with role "superadmin"
+
+Admin management
+  -> GET /api/admin/users
+  -> GET /api/admin/users/pending
+  -> PATCH /api/admin/users/:id/approve
+  -> PATCH /api/admin/users/:id/reject
+  -> DELETE /api/admin/users/:id
+  -> GET /api/admin/notifications/count
+```
+
+Admin refresh tokens are signed JWTs and are not inserted into
+`refresh_tokens`, because there is no admin row in `users`.
+
+---
+
+## Environment variables
+
+```bash
+JWT_SECRET=<random 64 hex chars>
+JWT_REFRESH_SECRET=<different random 64 hex chars>
+JWT_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=7d
+
+ADMIN_EMAIL=<admin email>
+ADMIN_PASSWORD_HASH=<bcrypt hash, cost 12>
+```
+
+Generate secrets:
+
+```bash
+openssl rand -hex 32
+```
+
+Generate the admin password hash:
+
+```bash
+node -e 'require("bcrypt").hash("your-password", 12).then(console.log)'
 ```
 
 ---
 
-## SQLite schema (add to existing database)
+## SQLite schema
+
+Defined in `backend/src/db.ts`.
 
 ```sql
--- Add to the same db.ts that manages the apps table
-
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
@@ -46,8 +111,6 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    TEXT DEFAULT (datetime('now')),
   updated_at    TEXT DEFAULT (datetime('now'))
 );
--- status values: 'pending' | 'approved' | 'rejected'
--- role values:   'user' (superadmin is env-only, never in DB)
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
   id          TEXT PRIMARY KEY,
@@ -59,222 +122,151 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 );
 ```
 
----
+Status values:
 
-## Environment variables (add to `.env`)
+- `pending`
+- `approved`
+- `rejected`
 
-```bash
-# JWT
-JWT_SECRET=<random 64 char string>           # openssl rand -hex 32
-JWT_REFRESH_SECRET=<different random string>  # openssl rand -hex 32
-JWT_EXPIRES_IN=15m
-JWT_REFRESH_EXPIRES_IN=7d
+Role values:
 
-# Superadmin — never stored in DB
-ADMIN_EMAIL=admin@yourcompany.com
-ADMIN_PASSWORD_HASH=<bcrypt hash>
-# Generate hash: node -e "const b=require('bcrypt');b.hash('yourpassword',12).then(console.log)"
-```
+- `user` for database users.
+- `superadmin` for env-backed admin JWTs only.
 
 ---
 
-## API endpoints
+## Token behavior
 
-### Auth (users)
+| Token | Secret | Expiry | Storage |
+|---|---|---|---|
+| User access token | `JWT_SECRET` | `JWT_EXPIRES_IN`, default `15m` | Frontend Zustand memory |
+| User refresh token | `JWT_REFRESH_SECRET` | `JWT_REFRESH_EXPIRES_IN`, default `7d` | Client receives plaintext token; DB stores SHA-256 hash |
+| Admin access token | `JWT_SECRET` | `JWT_EXPIRES_IN`, default `15m` | Frontend admin Zustand memory |
+| Admin refresh token | `JWT_REFRESH_SECRET` | `JWT_REFRESH_EXPIRES_IN`, default `7d` | Client receives token; DB does not store it |
 
-| Method | Path | Auth required | Purpose |
-|--------|------|---------------|---------|
-| `POST` | `/api/auth/signup` | None | Register — creates pending user |
-| `POST` | `/api/auth/login` | None | Login — approved users only |
-| `POST` | `/api/auth/refresh` | None | Get new access token |
-| `POST` | `/api/auth/logout` | User JWT | Delete refresh token |
-| `GET` | `/api/auth/me` | User JWT | Current user profile |
+Access-token payload:
 
-### Admin
-
-| Method | Path | Auth required | Purpose |
-|--------|------|---------------|---------|
-| `POST` | `/api/admin/login` | None | Admin login (env credentials) |
-| `GET` | `/api/admin/users` | Admin JWT | List all users |
-| `GET` | `/api/admin/users/pending` | Admin JWT | List pending users only |
-| `PATCH` | `/api/admin/users/:id/approve` | Admin JWT | Approve a user |
-| `PATCH` | `/api/admin/users/:id/reject` | Admin JWT | Reject a user |
-| `DELETE` | `/api/admin/users/:id` | Admin JWT | Delete a user |
-| `GET` | `/api/admin/notifications/count` | Admin JWT | Count of pending users |
-
-### Protected routes (add JWT middleware to existing routes)
-All existing `/api/apps` and `/app/` routes require a valid user JWT.
-
----
-
-## Endpoint details
-
-### POST /api/auth/signup
-```
-Body:     { name, email, password, confirmPassword }
-Returns:  201 { message: "Account pending admin approval" }
-Errors:   400 if passwords don't match or email taken
-```
-- Hash password with bcrypt, cost factor 12
-- Create user with `status: 'pending'`
-- Do NOT issue a JWT
-
-### POST /api/auth/login
-```
-Body:     { email, password }
-Returns:  200 { accessToken, refreshToken, user }
-Errors:   401 invalid credentials
-          403 "Account pending approval" (correct password but not approved)
-          403 "Account rejected"
-```
-- Check password with bcrypt
-- Check `status === 'approved'` before issuing tokens
-- Store hashed refresh token in `refresh_tokens` table
-
-### POST /api/admin/login
-```
-Body:     { email, password }
-Returns:  200 { accessToken, refreshToken }
-```
-- Compare email against `ADMIN_EMAIL` env var
-- Compare password against `ADMIN_PASSWORD_HASH` with bcrypt
-- JWT payload: `{ userId: 'admin', email, role: 'superadmin' }`
-- Admin is **never** in the database
-
-### PATCH /api/admin/users/:id/approve
-```
-Returns:  200 { user }
-```
-- Set `status = 'approved'` and `updated_at = datetime('now')`
-
----
-
-## JWT details
-
-| Token | Secret | Expiry | Where stored |
-|-------|--------|--------|--------------|
-| Access token | `JWT_SECRET` | 15 min | Frontend memory (Zustand store) |
-| Refresh token | `JWT_REFRESH_SECRET` | 7 days | SQLite `refresh_tokens` table (hashed) |
-
-Access token payload: `{ userId, email, role, iat, exp }`
-
-The refresh token itself is sent to the client. Its hash is stored in the DB.
-On refresh, hash the incoming token and compare — never store plaintext tokens.
-
----
-
-## Middleware
-
-### `requireAuth` — protects user routes
-```ts
-// Checks Authorization: Bearer <token>
-// Decodes JWT, attaches user to req.user
-// Returns 401 if missing or expired
-```
-
-### `requireAdmin` — protects admin routes
-```ts
-// Same as requireAuth but also checks role === 'superadmin'
-// Returns 403 if role is wrong
-```
-
-Apply to routes:
-```ts
-router.get('/api/apps', requireAuth, getApps);
-router.use('/app/', requireAuth, proxyHandler);
-router.get('/api/admin/users', requireAdmin, getUsers);
-```
-
----
-
-## Frontend routes
-
-Add to the existing React SPA — no separate deployment:
-
-| Route | Component | Guard |
-|-------|-----------|-------|
-| `/signup` | SignupPage | Redirect to `/` if already logged in |
-| `/login` | LoginPage | Redirect to `/` if already logged in |
-| `/` | AppGrid | `RequireAuth` — redirect to `/login` if not logged in |
-| `/admin` | AdminLogin | Redirect to `/admin/dashboard` if already admin |
-| `/admin/dashboard` | AdminDashboard | `RequireAdmin` |
-| `/admin/users` | AdminUsers | `RequireAdmin` |
-
-### State management (Zustand)
-
-```ts
-// User store
+```json
 {
-  accessToken: string | null,
-  user: { id, name, email, role } | null,
-  setAuth: (token, user) => void,
-  clearAuth: () => void,
-}
-
-// Admin store (separate)
-{
-  adminToken: string | null,
-  setAdminToken: (token) => void,
-  clearAdminToken: () => void,
+  "userId": "...",
+  "email": "...",
+  "role": "user"
 }
 ```
 
-Store access tokens in memory only (Zustand). Use refresh token flow to
-silently re-authenticate on page reload. Do not store access tokens in
-localStorage — XSS risk.
+Admin access-token payload:
 
----
-
-## Admin UI (pages)
-
-### /admin — admin login
-Simple email + password form. On success, stores admin JWT and redirects to
-`/admin/dashboard`.
-
-### /admin/dashboard
-- Count of pending users (badge)
-- Quick approve/reject from dashboard
-
-### /admin/users
-- Table: name, email, status, registered date, actions
-- Filter tabs: All / Pending / Approved / Rejected
-- Per-row actions: Approve (green), Reject (red), Delete
-- Pending count badge in nav, polls every 60 seconds
-
----
-
-## What does NOT change
-
-- The SQLite database file location and connection — just add the two new tables
-- The SOCKS5 tunnel — auth is entirely on the Azure VM, tunnel is untouched
-- The app list API structure — just add `requireAuth` middleware to it
-- The nginx config — no changes needed
-
----
-
-## Build order for this feature
-
-1. Add `users` and `refresh_tokens` tables to `db.ts`
-2. Install: `npm install bcrypt jsonwebtoken` + types
-3. Build auth endpoints (`/api/auth/*`)
-4. Build admin endpoints (`/api/admin/*`)
-5. Write `requireAuth` and `requireAdmin` middleware
-6. Apply middleware to existing `/api/apps` and `/app/` routes
-7. Build frontend: Login, Signup, AdminLogin, AdminUsers pages
-8. Add route guards to React router
-9. Test the full flow: signup → pending → admin approves → login works
-
----
-
-## Generating the admin password hash
-
-Run this once on the VM to generate `ADMIN_PASSWORD_HASH` for your `.env`:
-
-```bash
-node -e "
-const bcrypt = require('bcrypt');
-bcrypt.hash('your-chosen-password', 12).then(h => console.log(h));
-"
+```json
+{
+  "userId": "admin",
+  "email": "...",
+  "role": "superadmin"
+}
 ```
 
-Paste the output into `.env` as `ADMIN_PASSWORD_HASH`.
+User refresh-token lookup:
+
+1. Verify refresh token with `JWT_REFRESH_SECRET`.
+2. Hash incoming token with SHA-256.
+3. Look up `refresh_tokens.token_hash`.
+4. Ensure the linked user exists and is still `approved`.
+5. Issue a new access token.
+
+Admin refresh-token lookup:
+
+1. Verify refresh token with `JWT_REFRESH_SECRET`.
+2. Check `payload.role === "superadmin"` and `payload.userId === "admin"`.
+3. Issue a new admin access token.
+
+---
+
+## Backend routes
+
+### Auth routes
+
+Mounted at `/api/auth` in `backend/src/index.ts`.
+
+| Method | Path | Auth | Behavior |
+|---|---|---|---|
+| `POST` | `/signup` | None | Create pending user; no token issued |
+| `POST` | `/login` | None | Approved users get access + refresh tokens |
+| `POST` | `/refresh` | None | Validate refresh token and issue access token |
+| `POST` | `/logout` | User JWT | Delete refresh-token hash |
+| `GET` | `/me` | User JWT | Return current user from SQLite |
+
+### Admin routes
+
+Mounted at `/api/admin`.
+
+| Method | Path | Auth | Behavior |
+|---|---|---|---|
+| `POST` | `/login` | None | Env-backed admin login |
+| `GET` | `/users` | Admin JWT | List all users |
+| `GET` | `/users/pending` | Admin JWT | List pending users |
+| `PATCH` | `/users/:id/approve` | Admin JWT | Set status to `approved` |
+| `PATCH` | `/users/:id/reject` | Admin JWT | Set status to `rejected` |
+| `DELETE` | `/users/:id` | Admin JWT | Delete user |
+| `GET` | `/notifications/count` | Admin JWT | Return `{ pendingCount }` |
+
+### Protected app routes
+
+Mounted in `backend/src/index.ts`:
+
+```ts
+app.use('/api/apps', requireAuth, appsRouter);
+app.use('/app/', requireAuth, proxyRequest);
+```
+
+`requireAuth` accepts:
+
+- `Authorization: Bearer <token>`
+- `?token=<token>` query param for browser tabs opened to `/app/:id/`
+
+The query-token path is necessary because clicking an app tile opens a new tab,
+where the browser cannot attach an Authorization header.
+
+---
+
+## Frontend behavior
+
+Routes are defined in `frontend/src/App.tsx`.
+
+| Path | Component | Guard |
+|---|---|---|
+| `/login` | `LoginPage` | Public |
+| `/signup` | `SignupPage` | Public |
+| `/` | `AppGrid` | `RequireAuth` |
+| `/admin` | `AdminLogin` | Public |
+| `/admin/dashboard` | `AdminDashboard` | `RequireAdmin` |
+| `/admin/users` | `AdminUsers` | `RequireAdmin` |
+
+State:
+
+- `useAuthStore`: user access token, user profile, initialization state.
+- `useAdminStore`: admin access token.
+- `useToastStore`: toast messages.
+
+Current session restore behavior:
+
+- On app load, `App.tsx` reads `refreshToken` from `localStorage`.
+- If present, it calls `POST /api/auth/refresh`.
+- It then calls `GET /api/auth/me` with the new access token.
+- If refresh fails, it removes `refreshToken` and treats the user as logged out.
+
+Security note: access tokens are in memory only. User refresh tokens currently
+persist in `localStorage`; moving them to HttpOnly cookies would reduce XSS
+exposure but requires backend/frontend changes.
+
+---
+
+## Implementation invariants
+
+- Do not write the admin to SQLite.
+- Do not store plaintext user refresh tokens in SQLite.
+- Keep `requireAuth` on both `/api/apps` and `/app/`.
+- Keep `requireAdmin` on all admin management routes.
+- Do not relax user status checks during login or refresh.
+- Use bcrypt cost 12 for password hashes.
+- Use separate Zustand stores for user and admin auth.
+- Avoid adding OAuth or Entra ID on top of this flow unless the task explicitly
+  asks for a migration.

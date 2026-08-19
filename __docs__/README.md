@@ -1,271 +1,293 @@
 # nebius-portal
 
-Internal web portal for finding and opening applications running on Nebius
-worker nodes. No SSH, no remembering ports. Open the portal, click a tile,
-the app opens.
+Internal web portal for finding and opening applications running on Nebius worker
+nodes. Users log in, see app tiles, and open apps without SSH or remembering
+ports.
 
 ---
 
 ## How it works
 
-```
-Browser → Azure VM nginx → Node.js backend → SOCKS5 tunnel → Nebius worker:PORT
+```text
+Browser -> Azure VM nginx -> Node.js backend -> SOCKS5 tunnel -> Nebius worker:PORT
 ```
 
-The Azure VM runs three things:
-1. **nginx** — serves the React portal and routes traffic to the backend
-2. **Node.js backend** — manages the app list in SQLite and proxies app requests
-   through the SOCKS5 tunnel
-3. **autossh** — holds a permanent SOCKS5 tunnel (port 1080) to the Nebius login
-   node, which forwards traffic to any worker node on the internal network
+The Azure VM runs:
 
-Adding a new app is a form submission. No tunnel restarts, no config file edits.
+1. `nginx`, which serves the React SPA and routes `/api/` plus `/app/`.
+2. A Node.js backend on `localhost:3001`, managed by pm2 as
+   `nebius-portal-api`.
+3. An `autossh -D 1080` SOCKS5 tunnel to the Nebius login node, managed by
+   systemd as `nebius-tunnel`.
+
+Adding a new app is a database write through the portal UI. The tunnel does not
+need to be changed or restarted for each app.
 
 ---
 
 ## Infrastructure
 
 | Resource | Detail |
-|----------|--------|
+|---|---|
 | Azure VM | `nebius-portal-vm`, UAE North, Standard_B2s |
+| Public IP | `74.243.253.208` |
+| DNS name | `nebius-portal-vm.uaenorth.cloudapp.azure.com` |
+| VM SSH alias | `azure-nebius-portal-vm` |
 | Nebius login node | `89.169.98.29`, SSH alias `nebius-networking` |
-| SOCKS5 tunnel | autossh `-D 1080`, runs as systemd service `nebius-tunnel` |
-| Worker nodes | worker-0 through worker-7 (see IPs in PROJ_SPEC.md) |
+| SOCKS5 tunnel | `autossh -D 1080`, service `nebius-tunnel` |
+| Worker nodes | `worker-0` through `worker-7` |
 
-### SSH aliases on the Azure VM (`~/.ssh/config`)
-
-```
-Host nebius-networking
-    HostName 89.169.98.29
-    User networking
-    IdentityFile ~/.ssh/nebius_id_rsa
-
-Host worker-0
-    HostName 10.62.40.79
-
-Host worker-1
-    HostName 10.62.8.22
-
-Host worker-2
-    HostName 10.62.12.71
-
-Host worker-3
-    HostName 10.62.134.28
-
-Host worker-4
-    HostName 10.62.5.94
-
-Host worker-5
-    HostName 10.62.115.41
-
-Host worker-6
-    HostName 10.62.26.144
-
-Host worker-7
-    HostName 10.62.116.171
-```
+Worker pod IPs can rotate. Use hostnames like `worker-0` in app records.
 
 ---
 
 ## Repo structure
 
-```
+```text
 nebius-portal/
-├── __docs__/
-│   ├── PROJ_SPEC.md
-│   ├── PLAN.md
-│   └── README.md
-├── frontend/               # React + Vite + TypeScript + Tailwind
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── AppGrid.tsx
-│   │   │   ├── AppTile.tsx
-│   │   │   ├── AddAppModal.tsx
-│   │   │   └── StatusDot.tsx
-│   │   ├── api/            # calls to /api/apps
-│   │   └── App.tsx
-│   └── vite.config.ts
-├── backend/                # Node.js + Express
-│   ├── src/
-│   │   ├── index.ts
-│   │   ├── routes/apps.ts
-│   │   ├── proxy.ts        # SOCKS5 proxy handler
-│   │   ├── db.ts           # SQLite
-│   │   └── allowlist.ts
-│   ├── .env.example
-│   └── package.json
-├── nginx/
-│   └── nebius-portal.conf  # nginx config for the Azure VM
-├── terraform/              # Azure VM provisioning
-└── README.md
+  __docs__/
+    PROJ_SPEC.md      Architecture and project invariants
+    MEMORY.md         Current continuation guide
+    README.md         This operator-facing overview
+    AUTH_SPEC.md      Implemented auth/admin behavior
+    PLAN.md           Status, remaining work, and runbook
+    SET_UP.md         Terraform and tunnel setup notes
+    VM_SET_UP.md      VM setup and deployment notes
+  backend/
+    src/
+      index.ts
+      db.ts
+      allowlist.ts
+      proxy.ts
+      middleware/auth.ts
+      routes/auth.ts
+      routes/admin.ts
+      routes/apps.ts
+    .env.example
+    package.json
+  frontend/
+    src/
+      App.tsx
+      lib/api.ts
+      components/
+      pages/
+      stores/
+    package.json
+    vite.config.ts
+  nginx/
+    nebius-portal.conf
+  terraform/
+  deploy.sh
 ```
 
 ---
 
-## The one thing every Nebius app must have
+## Local development
 
-When an app is shown under `/app/{id}/`, the app must know it lives at that path
-or it renders with broken styling and dead buttons.
+Install dependencies in each app directory:
 
-### Gradio apps
-```python
-demo.launch(
-    server_name="0.0.0.0",
-    server_port=8001,
-    root_path="/app/{id}",   # shown in the portal after you add the app
-)
+```bash
+cd backend && npm install
+cd ../frontend && npm install
 ```
 
-### React apps (Vite)
-```ts
-// vite.config.ts
-export default defineConfig({
-  base: '/app/{id}/',
-})
-```
-```tsx
-// if using React Router
-<BrowserRouter basename="/app/{id}">
+Backend:
+
+```bash
+npm --prefix backend run dev
+npm --prefix backend run typecheck
+npm --prefix backend run build
 ```
 
-The portal shows the exact value to copy after you save a new app. Apply it on
-the Nebius worker and restart the app. One time, per app.
+Frontend:
+
+```bash
+npm --prefix frontend run dev
+npm --prefix frontend run build
+```
+
+The frontend API client calls relative `/api/*` paths. In production nginx routes
+those to the backend.
+
+---
+
+## Backend environment
+
+Use `backend/.env.example` as the template.
+
+```bash
+PORT=3001
+DB_PATH=/opt/nebius-portal/backend/data/apps.db
+SOCKS_PROXY=socks5h://localhost:1080
+ALLOWED_HOSTS=worker-0,worker-1,worker-2,worker-3,worker-4,worker-5,worker-6,worker-7
+
+JWT_SECRET=<64 hex chars>
+JWT_REFRESH_SECRET=<64 hex chars, different from JWT_SECRET>
+JWT_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=7d
+
+ADMIN_EMAIL=<admin email>
+ADMIN_PASSWORD_HASH=<bcrypt hash, cost 12>
+```
+
+Important: `socks5h://` is required. The `h` makes DNS resolution happen through
+the Nebius login node, where `worker-0` hostnames resolve.
+
+Generate admin password hash on the VM:
+
+```bash
+cd /opt/nebius-portal/backend
+node -e 'require("bcrypt").hash("your-password", 12).then(console.log)'
+```
+
+---
+
+## Routes
+
+### Frontend routes
+
+| Path | Purpose |
+|---|---|
+| `/login` | User login |
+| `/signup` | User registration |
+| `/` | Protected app grid |
+| `/admin` | Admin login |
+| `/admin/dashboard` | Protected admin dashboard |
+| `/admin/users` | Protected user approval and management |
+
+### API routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Health check |
+| `POST` | `/api/auth/signup` | Create pending user |
+| `POST` | `/api/auth/login` | Login approved user |
+| `POST` | `/api/auth/refresh` | Refresh access token |
+| `POST` | `/api/auth/logout` | Revoke user refresh token |
+| `GET` | `/api/auth/me` | Current user |
+| `POST` | `/api/admin/login` | Env-backed admin login |
+| `GET` | `/api/admin/users` | List all users |
+| `GET` | `/api/admin/users/pending` | List pending users |
+| `PATCH` | `/api/admin/users/:id/approve` | Approve user |
+| `PATCH` | `/api/admin/users/:id/reject` | Reject user |
+| `DELETE` | `/api/admin/users/:id` | Delete user |
+| `GET` | `/api/admin/notifications/count` | Pending-user count |
+| `GET` | `/api/apps` | List apps |
+| `POST` | `/api/apps` | Add app |
+| `PUT` | `/api/apps/:id` | Update app |
+| `DELETE` | `/api/apps/:id` | Remove app |
+| `GET` | `/api/apps/:id/health` | Probe app through SOCKS tunnel |
+| `ANY` | `/app/:id/*` | Proxy to worker app through SOCKS tunnel |
+
+`/api/apps` and `/app/` require a user JWT. Admin routes require a superadmin
+JWT.
 
 ---
 
 ## Adding a new app
 
-1. Click **Add app** in the portal
-2. Fill in: Name, Host (worker-0 through worker-7), Port, Type, Description
-3. Save — tile appears immediately for everyone
-4. Copy the `root_path`/`base` value shown in the confirmation banner
-5. SSH into the worker and apply that value to the app, then restart it
-6. Refresh the portal — the app loads correctly
+1. Log in to the portal.
+2. Click **Add app**.
+3. Enter name, host (`worker-0` through `worker-7`), port, type, and description.
+4. Save the app. The backend creates an 8-character app id.
+5. Configure the app on Nebius to live under `/app/{id}`.
+6. Restart the Nebius app and open the tile from the portal.
 
----
+The portal proxy preserves the `/app/{id}` path. Apps must be configured for
+that path or static assets and routing can break.
 
-## Environment variables (backend `.env`)
+### Gradio apps
 
-```bash
-PORT=3001
-DB_PATH=/opt/nebius-portal/backend/data/apps.db
+```python
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=8001,
+    root_path="/app/{id}",
+)
+```
 
-# socks5h:// = remote DNS (the h matters — worker-0 resolves on the login node)
-# Do NOT use socks5:// — worker hostnames don't resolve on the Azure VM
-SOCKS_PROXY=socks5h://localhost:1080
+### React/Vite apps
 
-# Hosts users are allowed to add. Any other host is rejected.
-ALLOWED_HOSTS=worker-0,worker-1,worker-2,worker-3,worker-4,worker-5,worker-6,worker-7
+```ts
+// vite.config.ts
+export default defineConfig({
+  base: "/app/{id}/",
+})
+```
+
+```tsx
+<BrowserRouter basename="/app/{id}">
 ```
 
 ---
 
-## API
+## Deployment
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/apps` | List all apps |
-| `POST` | `/api/apps` | Add an app |
-| `PUT` | `/api/apps/:id` | Edit an app |
-| `DELETE` | `/api/apps/:id` | Remove an app |
-| `GET` | `/api/apps/:id/health` | Check reachability via tunnel |
-| `ANY` | `/app/:id/*` | Proxy to worker:port via SOCKS5 tunnel |
-
----
-
-## Deploying the frontend
+Use the repo-level helper:
 
 ```bash
-# On your dev machine
-cd frontend
-npm install
-npm run build
-
-# Deploy to the VM
-scp -r dist/* azure-nebius-portal-vm:/var/www/nebius-portal/
+./deploy.sh frontend
+./deploy.sh backend
+./deploy.sh nginx
+./deploy.sh
 ```
+
+Deploy targets:
+
+| Target | What it does |
+|---|---|
+| `frontend` | Builds `frontend/` and uploads `frontend/dist/*` to `/var/www/nebius-portal/` |
+| `backend` | Rsyncs backend source, installs deps, builds, restarts pm2 |
+| `nginx` | Uploads `nginx/nebius-portal.conf`, tests config, reloads nginx |
+| no args | Runs frontend, backend, and nginx deployment |
 
 ---
 
-## Managing the backend on the VM
+## Operations
+
+Backend:
 
 ```bash
-# View logs
-pm2 logs nebius-portal-api
-
-# Restart after a code change
-pm2 restart nebius-portal-api
-
-# Check status
-pm2 status
+ssh azure-nebius-portal-vm "pm2 status"
+ssh azure-nebius-portal-vm "pm2 logs nebius-portal-api --lines 50"
+ssh azure-nebius-portal-vm "pm2 restart nebius-portal-api"
 ```
 
----
-
-## Managing the tunnel
+Tunnel:
 
 ```bash
-# Check tunnel is running
-sudo systemctl status nebius-tunnel
-
-# View tunnel logs
-journalctl -u nebius-tunnel -f
-
-# Restart tunnel (rarely needed — autossh handles drops automatically)
-sudo systemctl restart nebius-tunnel
-
-# Verify SOCKS proxy is listening
-nc -zv localhost 1080
-
-# Test a specific worker through the tunnel (use worker hostname, not IP)
-curl --socks5h localhost:1080 http://worker-0:8001
+ssh azure-nebius-portal-vm "sudo systemctl status nebius-tunnel"
+ssh azure-nebius-portal-vm "journalctl -u nebius-tunnel -n 100 --no-pager"
+ssh azure-nebius-portal-vm "curl --socks5h localhost:1080 http://worker-0:8001"
 ```
 
----
+Public smoke checks:
 
-## Adding a new worker node
-
-When a new worker node is added to Nebius:
-
-1. Get its IP from the login node:
-   ```bash
-   ssh nebius-networking "getent hosts worker-8"
-   ```
-
-2. Add it to `~/.ssh/config` on the Azure VM:
-   ```
-   Host worker-8
-       HostName <ip>
-   ```
-
-3. Add `worker-8` to `ALLOWED_HOSTS` in the backend `.env`
-
-4. Restart the backend:
-   ```bash
-   pm2 restart nebius-portal-api
-   ```
-
-The tunnel does **not** need to be restarted — SOCKS5 covers all hosts
-automatically.
+```bash
+curl -s http://nebius-portal-vm.uaenorth.cloudapp.azure.com/api/health
+curl -s http://74.243.253.208/api/health
+```
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| App loads but looks broken | `root_path`/`base` not set on the Nebius app | Set it on the worker — see above |
-| Gradio loads but doesn't respond | WebSocket not forwarding | Check `Upgrade` header is passed in nginx and Node.js proxy |
-| `worker-0` hostname not resolving | Using `socks5://` not `socks5h://` | Fix `SOCKS_PROXY` in `.env` — the `h` is not optional |
-| Tunnel down, apps unreachable | autossh service crashed | `sudo systemctl restart nebius-tunnel` |
-| App list empty after VM restart | pm2 not set to autostart | `pm2 startup` → follow printed command → `pm2 save` |
-| New app returns 502 | App not running on that port | SSH to worker, confirm app is running |
-| Port 1080 connection refused | Tunnel not running | `sudo systemctl start nebius-tunnel` |
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| App loads without styling or broken buttons | App is not configured for `/app/{id}` | Set Gradio `root_path` or Vite `base`/router basename |
+| Worker hostname does not resolve | Using `socks5://` or local DNS | Use `socks5h://localhost:1080` |
+| App returns 502 | Worker app is down, wrong port, or tunnel is down | Check app process, port, and `nebius-tunnel` |
+| New host rejected | Host missing from `ALLOWED_HOSTS` | Add hostname to env and restart backend |
+| Backend 502 through nginx | pm2 process is down | Check `pm2 status` and backend logs |
+| Frontend route 404s | nginx SPA fallback missing or stale config | Deploy `nginx/nebius-portal.conf` and reload nginx |
 
 ---
 
-## Terraform (VM provisioning)
+## Related docs
 
-The `terraform/` directory provisions the Azure VM from scratch.
-See `terraform/README.md` for instructions.
-All infrastructure is tagged `project=nebius-portal` in Azure.
+- `__docs__/PROJ_SPEC.md`: architecture and invariants.
+- `__docs__/AUTH_SPEC.md`: auth and admin approval details.
+- `__docs__/MEMORY.md`: current continuation guide.
+- `__docs__/PLAN.md`: status, remaining work, and operations checklist.
+- `__docs__/SET_UP.md`: Terraform, SSH, and tunnel setup.
+- `__docs__/VM_SET_UP.md`: VM deployment runbook.
