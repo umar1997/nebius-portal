@@ -1,0 +1,4 @@
+Please update all the files in @__docs__ and @README.md if any of them need changing after the recent changes that we have made and also add the new files that we have created to the directory structure. I am about to start a new session so you will lose all context so make sure you dont miss anything.
+
+
+Please read all the files in @__docs__ and @README.md to get a clear understanding of the work that has been done and let me know when you are ready for your task and have understood everything that has been done.

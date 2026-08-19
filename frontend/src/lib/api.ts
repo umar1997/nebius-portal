@@ -42,7 +42,13 @@ async function request<T>(
   let token: string | null = null
   if (!noAuth) {
     if (adminAuth) {
+      // Superadmin (env-backed) uses the separate adminStore token.
+      // DB admin users logged in via /login use their regular access token.
       token = useAdminStore.getState().adminToken
+      if (!token) {
+        const role = useAuthStore.getState().user?.role
+        if (role === 'admin') token = useAuthStore.getState().accessToken
+      }
     } else {
       token = useAuthStore.getState().accessToken
     }
@@ -65,8 +71,8 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }))
-    throw new Error(err.message || `Request failed (${res.status})`)
+    const err = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(err.error || err.message || `Request failed (${res.status})`)
   }
 
   if (res.status === 204) return undefined as T
@@ -172,6 +178,57 @@ export const adminApi = {
 
   getNotificationsCount: () =>
     request<{ pendingCount: number }>('/admin/notifications/count', { adminAuth: true }),
+
+  createUser: (data: { name: string; email: string; password: string; role?: 'user' | 'admin' }) =>
+    request<{ user: User }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      adminAuth: true,
+    }),
+
+  setUserPassword: (id: string, password: string) =>
+    request<{ message: string }>(`/admin/users/${id}/password`, {
+      method: 'PATCH',
+      body: JSON.stringify({ password }),
+      adminAuth: true,
+    }),
+
+  setUserRole: (id: string, role: 'admin' | 'user') =>
+    request<{ user: User }>(`/admin/users/${id}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+      adminAuth: true,
+    }),
+
+  getUserApps: (id: string) =>
+    request<{ appIds: string[] }>(`/admin/users/${id}/apps`, { adminAuth: true }),
+
+  setUserApps: (id: string, appIds: string[]) =>
+    request<{ appIds: string[] }>(`/admin/users/${id}/apps`, {
+      method: 'PUT',
+      body: JSON.stringify({ appIds }),
+      adminAuth: true,
+    }),
+
+  getApps: () =>
+    request<{ apps: App[] }>('/apps', { adminAuth: true }).then((r) => r.apps),
+
+  createApp: (data: Omit<App, 'id' | 'created_at'>) =>
+    request<{ app: App; rootPath: string }>('/apps', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      adminAuth: true,
+    }),
+
+  updateApp: (id: string, data: Partial<Omit<App, 'id' | 'created_at'>>) =>
+    request<{ app: App }>(`/apps/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+      adminAuth: true,
+    }),
+
+  deleteApp: (id: string) =>
+    request<void>(`/apps/${id}`, { method: 'DELETE', adminAuth: true }),
 }
 
 // ─── Apps API ─────────────────────────────────────────────────────────────────

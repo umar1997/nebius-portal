@@ -45,10 +45,24 @@ function validateFields(
 }
 
 // ── GET /api/apps ─────────────────────────────────────────────────────────────
+// Users with role 'user' only see apps they have explicit permission to access.
+// Admin and superadmin roles see all apps.
 
-router.get('/', (_req: Request, res: Response) => {
+router.get('/', (req: Request, res: Response) => {
   try {
-    const apps = db.prepare('SELECT * FROM apps ORDER BY created_at DESC').all() as App[];
+    let apps: App[];
+    if (req.user?.role === 'user') {
+      apps = db
+        .prepare(`
+          SELECT apps.* FROM apps
+          INNER JOIN user_app_permissions ON apps.id = user_app_permissions.app_id
+          WHERE user_app_permissions.user_id = ?
+          ORDER BY apps.created_at DESC
+        `)
+        .all(req.user.userId) as App[];
+    } else {
+      apps = db.prepare('SELECT * FROM apps ORDER BY created_at DESC').all() as App[];
+    }
     return res.json({ apps });
   } catch (err) {
     console.error('[apps/list]', err);

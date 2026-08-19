@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { Cpu, LogOut, ChevronLeft, ChevronRight, Zap } from 'lucide-react'
+import { Cpu, LogOut, ChevronLeft, ChevronRight, Zap, Shield } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useAuthStore } from '../stores/useAuthStore'
 import { authApi } from '../lib/api'
@@ -24,6 +24,9 @@ export default function Sidebar() {
 
   const navItems = [
     { to: '/', icon: Cpu, label: 'Applications' },
+    ...(user?.role === 'admin'
+      ? [{ to: '/admin/dashboard', icon: Shield, label: 'Admin Panel' }]
+      : []),
   ]
 
   return (

@@ -1,16 +1,35 @@
 import { NavLink, useNavigate, Link } from 'react-router-dom'
-import { LayoutDashboard, Users, Shield, LogOut, ArrowLeft } from 'lucide-react'
+import { LayoutDashboard, Users, Shield, LogOut, Zap } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useAdminStore } from '../stores/useAdminStore'
+import { useAuthStore } from '../stores/useAuthStore'
 import { toast } from '../stores/useToastStore'
 
 interface AdminSidebarProps {
   pendingCount?: number
 }
 
+function decodeJwtEmail(token: string): string {
+  try {
+    return JSON.parse(atob(token.split('.')[1])).email ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export default function AdminSidebar({ pendingCount = 0 }: AdminSidebarProps) {
-  const { clearAdminToken } = useAdminStore()
+  const { adminToken, clearAdminToken } = useAdminStore()
+  const { user } = useAuthStore()
   const navigate = useNavigate()
+
+  // Resolve which identity is active in the admin session.
+  // Env superadmin: adminToken only, no authStore user.
+  // DB admin: user in authStore, no adminToken.
+  const identity = adminToken
+    ? { name: 'Super Admin', email: decodeJwtEmail(adminToken) }
+    : user
+    ? { name: user.name, email: user.email }
+    : null
 
   const handleLogout = () => {
     clearAdminToken()
@@ -62,17 +81,27 @@ export default function AdminSidebar({ pendingCount = 0 }: AdminSidebarProps) {
             )}
           </NavLink>
         ))}
+
+        {/* User Portal link — separator before it */}
+        <div className="pt-3 mt-3 border-t border-slate-800">
+          <Link
+            to="/"
+            className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-400 hover:bg-green-500/10 hover:text-green-400 transition-all duration-150 cursor-pointer"
+          >
+            <Zap className="h-[18px] w-[18px] shrink-0" />
+            User Portal
+          </Link>
+        </div>
       </nav>
 
-      {/* Bottom */}
+      {/* Identity + Sign out */}
       <div className="border-t border-slate-800 p-3 space-y-1">
-        <Link
-          to="/"
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-all duration-150 cursor-pointer"
-        >
-          <ArrowLeft className="h-4 w-4 shrink-0" />
-          Back to Portal
-        </Link>
+        {identity && (
+          <div className="mb-2 rounded-lg bg-slate-800/50 px-3 py-2">
+            <p className="text-xs font-semibold text-slate-200 truncate">{identity.name}</p>
+            <p className="text-[11px] text-slate-500 truncate">{identity.email}</p>
+          </div>
+        )}
         <button
           onClick={handleLogout}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all duration-150 cursor-pointer"

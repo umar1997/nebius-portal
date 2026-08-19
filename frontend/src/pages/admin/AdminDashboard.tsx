@@ -1,213 +1,295 @@
-import { useState, useEffect } from 'react'
-import { Users, CheckCircle, XCircle, Clock, Loader2 } from 'lucide-react'
-import { Link } from 'react-router-dom'
-import AdminSidebar from '../../components/AdminSidebar'
-import { User, adminApi } from '../../lib/api'
-import { toast } from '../../stores/useToastStore'
+import { useState, useEffect, useMemo } from 'react'
+import { Plus, Pencil, Trash2, Loader2, Search, RefreshCw } from 'lucide-react'
 import { clsx } from 'clsx'
+import AdminSidebar from '../../components/AdminSidebar'
+import AddAppModal from '../../components/AddAppModal'
+import { App, adminApi } from '../../lib/api'
+import { toast } from '../../stores/useToastStore'
+
+const TYPE_CONFIG: Record<App['type'], { label: string; className: string }> = {
+  react:  { label: 'React',  className: 'bg-blue-500/15 text-blue-400 ring-1 ring-blue-500/25' },
+  gradio: { label: 'Gradio', className: 'bg-orange-500/15 text-orange-400 ring-1 ring-orange-500/25' },
+  other:  { label: 'Other',  className: 'bg-violet-500/15 text-violet-400 ring-1 ring-violet-500/25' },
+}
+
+type TypeFilter = 'all' | App['type']
 
 export default function AdminDashboard() {
-  const [users, setUsers] = useState<User[]>([])
+  const [apps, setApps] = useState<App[]>([])
   const [loading, setLoading] = useState(true)
-  const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
+  const [pendingCount, setPendingCount] = useState(0)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingApp, setEditingApp] = useState<App | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<App | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
 
-  const fetchUsers = async () => {
+  const fetchApps = async () => {
+    setLoading(true)
     try {
-      const data = await adminApi.getUsers()
-      setUsers(data)
+      const data = await adminApi.getApps()
+      setApps(data)
     } catch {
-      toast.error('Failed to load users')
+      toast.error('Failed to load applications')
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { fetchUsers() }, [])
+  useEffect(() => {
+    fetchApps()
+    adminApi.getNotificationsCount()
+      .then(({ pendingCount: c }) => setPendingCount(c))
+      .catch(() => {})
+  }, [])
 
-  const pending = users.filter((u) => u.status === 'pending')
-  const approved = users.filter((u) => u.status === 'approved')
-  const rejected = users.filter((u) => u.status === 'rejected')
+  const filtered = useMemo(() => {
+    return apps.filter((a) => {
+      const matchesType = typeFilter === 'all' || a.type === typeFilter
+      const q = search.toLowerCase()
+      const matchesSearch =
+        !q ||
+        a.name.toLowerCase().includes(q) ||
+        a.host.toLowerCase().includes(q) ||
+        a.description?.toLowerCase().includes(q)
+      return matchesType && matchesSearch
+    })
+  }, [apps, search, typeFilter])
 
-  const handleApprove = async (user: User) => {
-    setActionLoading(user.id + '-approve')
+  const handleSave = (saved: App) => {
+    setApps((prev) => {
+      const idx = prev.findIndex((a) => a.id === saved.id)
+      if (idx >= 0) {
+        const next = [...prev]
+        next[idx] = saved
+        return next
+      }
+      return [saved, ...prev]
+    })
+  }
+
+  const handleDelete = async () => {
+    if (!confirmDelete) return
+    setDeleteLoading(true)
     try {
-      await adminApi.approveUser(user.id)
-      setUsers((prev) =>
-        prev.map((u) => (u.id === user.id ? { ...u, status: 'approved' } : u))
-      )
-      toast.success(`${user.name} approved`)
+      await adminApi.deleteApp(confirmDelete.id)
+      setApps((prev) => prev.filter((a) => a.id !== confirmDelete.id))
+      toast.success(`"${confirmDelete.name}" removed`)
+      setConfirmDelete(null)
     } catch {
-      toast.error('Failed to approve user')
+      toast.error('Failed to delete application')
     } finally {
-      setActionLoading(null)
+      setDeleteLoading(false)
     }
   }
 
-  const handleReject = async (user: User) => {
-    setActionLoading(user.id + '-reject')
-    try {
-      await adminApi.rejectUser(user.id)
-      setUsers((prev) =>
-        prev.map((u) => (u.id === user.id ? { ...u, status: 'rejected' } : u))
-      )
-      toast.success(`${user.name} rejected`)
-    } catch {
-      toast.error('Failed to reject user')
-    } finally {
-      setActionLoading(null)
-    }
+  const closeModal = () => {
+    setModalOpen(false)
+    setEditingApp(null)
   }
 
-  const stats = [
-    {
-      label: 'Total users',
-      value: users.length,
-      icon: Users,
-      color: 'text-slate-400',
-      bg: 'bg-slate-800',
-    },
-    {
-      label: 'Pending approval',
-      value: pending.length,
-      icon: Clock,
-      color: 'text-amber-400',
-      bg: 'bg-amber-500/10',
-      ring: 'ring-amber-500/20',
-    },
-    {
-      label: 'Approved',
-      value: approved.length,
-      icon: CheckCircle,
-      color: 'text-green-400',
-      bg: 'bg-green-500/10',
-      ring: 'ring-green-500/20',
-    },
-    {
-      label: 'Rejected',
-      value: rejected.length,
-      icon: XCircle,
-      color: 'text-red-400',
-      bg: 'bg-red-500/10',
-      ring: 'ring-red-500/20',
-    },
+  const filterTabs: { value: TypeFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: 'react', label: 'React' },
+    { value: 'gradio', label: 'Gradio' },
+    { value: 'other', label: 'Other' },
   ]
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-950">
-      <AdminSidebar pendingCount={pending.length} />
+      <AdminSidebar pendingCount={pendingCount} />
 
       <main className="flex flex-1 flex-col overflow-hidden">
         {/* Header */}
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-800 px-6">
           <div>
-            <h1 className="text-base font-semibold text-slate-100">Dashboard</h1>
-            <p className="text-[11px] text-slate-500">User management overview</p>
+            <h1 className="text-base font-semibold text-slate-100">Applications</h1>
+            <p className="text-[11px] text-slate-500">
+              {loading ? 'Loading…' : `${apps.length} app${apps.length !== 1 ? 's' : ''} registered`}
+            </p>
           </div>
-          <Link
-            to="/admin/users"
-            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-          >
-            View all users →
-          </Link>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchApps}
+              className="rounded-lg p-2 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-all cursor-pointer"
+              aria-label="Refresh"
+            >
+              <RefreshCw className={clsx('h-4 w-4', loading && 'animate-spin')} />
+            </button>
+            <button
+              onClick={() => { setEditingApp(null); setModalOpen(true) }}
+              className="flex items-center gap-2 rounded-xl bg-violet-500 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-400 transition-colors cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              Add App
+            </button>
+          </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Stat cards */}
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            {stats.map(({ label, value, icon: Icon, color, bg, ring }) => (
-              <div
-                key={label}
-                className="rounded-2xl border border-slate-800 bg-slate-900 p-5"
+        {/* Filters */}
+        <div className="flex items-center gap-4 border-b border-slate-800 px-6 py-3">
+          <div className="relative w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search apps…"
+              className="w-full rounded-lg border border-slate-800 bg-slate-900 py-1.5 pl-9 pr-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500/40 transition-all"
+            />
+          </div>
+          <div className="flex items-center gap-1">
+            {filterTabs.map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => setTypeFilter(value)}
+                className={clsx(
+                  'rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer',
+                  typeFilter === value
+                    ? 'bg-slate-700 text-slate-100'
+                    : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
+                )}
               >
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-medium text-slate-500">{label}</p>
-                  <div className={clsx('rounded-lg p-1.5', bg, ring && `ring-1 ${ring}`)}>
-                    <Icon className={clsx('h-4 w-4', color)} />
-                  </div>
-                </div>
-                <p className="mt-3 text-3xl font-bold text-slate-100">
-                  {loading ? '–' : value}
-                </p>
-              </div>
+                {label}
+              </button>
             ))}
           </div>
+        </div>
 
-          {/* Pending users */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden">
-            <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold text-slate-100">Pending Approval</h2>
-                {pending.length > 0 && (
-                  <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-500/20 px-1.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30">
-                    {pending.length}
-                  </span>
-                )}
-              </div>
-              <Link
-                to="/admin/users"
-                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                View all
-              </Link>
+        {/* Table */}
+        <div className="flex-1 overflow-auto">
+          {loading ? (
+            <div className="flex items-center justify-center py-24">
+              <Loader2 className="h-6 w-6 animate-spin text-slate-500" />
             </div>
-
-            {loading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="h-5 w-5 animate-spin text-slate-500" />
-              </div>
-            ) : pending.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <CheckCircle className="mb-2 h-8 w-8 text-green-500/40" />
-                <p className="text-sm text-slate-500">No pending requests</p>
-              </div>
-            ) : (
-              <ul className="divide-y divide-slate-800">
-                {pending.map((user) => (
-                  <li key={user.id} className="flex items-center justify-between px-5 py-4">
-                    <div>
-                      <p className="text-sm font-medium text-slate-200">{user.name}</p>
-                      <p className="text-xs text-slate-500">{user.email}</p>
-                      <p className="text-[10px] text-slate-600 mt-0.5">
-                        {new Date(user.created_at).toLocaleDateString('en-GB', {
-                          day: 'numeric',
-                          month: 'short',
-                          year: 'numeric',
-                        })}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleReject(user)}
-                        disabled={!!actionLoading}
-                        className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-400 ring-1 ring-red-500/25 hover:bg-red-500/10 disabled:opacity-50 transition-all cursor-pointer"
-                      >
-                        {actionLoading === user.id + '-reject' ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <XCircle className="h-3 w-3" />
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <p className="text-sm text-slate-500">
+                {apps.length === 0 ? 'No applications registered yet.' : 'No apps match your search.'}
+              </p>
+              {apps.length === 0 && (
+                <button
+                  onClick={() => setModalOpen(true)}
+                  className="mt-4 flex items-center gap-2 rounded-xl bg-violet-500 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-400 transition-colors cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add your first app
+                </button>
+              )}
+            </div>
+          ) : (
+            <table className="w-full border-collapse">
+              <thead className="sticky top-0 bg-slate-950">
+                <tr className="border-b border-slate-800">
+                  {['Application', 'Worker', 'Port', 'Type', 'Added', 'Actions'].map((col) => (
+                    <th
+                      key={col}
+                      className="px-6 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500"
+                    >
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {filtered.map((app) => {
+                  const typeCfg = TYPE_CONFIG[app.type]
+                  return (
+                    <tr key={app.id} className="group hover:bg-slate-900/50 transition-colors">
+                      <td className="px-6 py-4">
+                        <p className="text-sm font-medium text-slate-200">{app.name}</p>
+                        {app.description && (
+                          <p className="text-xs text-slate-500 mt-0.5 max-w-xs truncate">{app.description}</p>
                         )}
-                        Reject
-                      </button>
-                      <button
-                        onClick={() => handleApprove(user)}
-                        disabled={!!actionLoading}
-                        className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-green-400 ring-1 ring-green-500/25 hover:bg-green-500/10 disabled:opacity-50 transition-all cursor-pointer"
-                      >
-                        {actionLoading === user.id + '-approve' ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <CheckCircle className="h-3 w-3" />
-                        )}
-                        Approve
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+                        <p className="text-[10px] text-slate-600 font-mono mt-0.5">/app/{app.id}</p>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="font-mono text-xs text-slate-300">{app.host}</span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="font-mono text-xs text-slate-300">{app.port}</span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={clsx('inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium', typeCfg.className)}>
+                          {typeCfg.label}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <p className="text-xs text-slate-400">
+                          {new Date(app.created_at).toLocaleDateString('en-GB', {
+                            day: 'numeric', month: 'short', year: 'numeric',
+                          })}
+                        </p>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => { setEditingApp(app); setModalOpen(true) }}
+                            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-all cursor-pointer"
+                            aria-label="Edit"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(app)}
+                            className="rounded-lg p-1.5 text-slate-600 hover:bg-red-500/10 hover:text-red-400 transition-all cursor-pointer"
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </main>
+
+      {/* Add / Edit modal */}
+      {modalOpen && (
+        <AddAppModal
+          app={editingApp}
+          onClose={closeModal}
+          onSave={handleSave}
+          useAdminAuth
+        />
+      )}
+
+      {/* Delete confirmation */}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center p-4"
+          onClick={(e) => e.target === e.currentTarget && setConfirmDelete(null)}
+        >
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative z-50 w-full max-w-sm animate-slide-up rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+            <h3 className="text-base font-semibold text-slate-100">Remove application?</h3>
+            <p className="mt-2 text-sm text-slate-400">
+              <span className="font-medium text-slate-200">"{confirmDelete.name}"</span> will be removed
+              from the portal. The app on Nebius is unaffected.
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                className="flex-1 rounded-xl border border-slate-700 py-2.5 text-sm font-medium text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleteLoading}
+                className="flex-1 rounded-xl bg-red-500/15 py-2.5 text-sm font-semibold text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/25 disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {deleteLoading ? 'Removing…' : 'Remove'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

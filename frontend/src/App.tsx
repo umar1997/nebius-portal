@@ -11,6 +11,7 @@ import AppGrid from './pages/AppGrid'
 import AdminLogin from './pages/admin/AdminLogin'
 import AdminDashboard from './pages/admin/AdminDashboard'
 import AdminUsers from './pages/admin/AdminUsers'
+import AdminApps from './pages/admin/AdminApps'
 
 export default function App() {
   const { setAuth, setInitialized } = useAuthStore()
@@ -69,6 +70,14 @@ export default function App() {
           element={
             <RequireAdmin>
               <AdminUsers />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/apps"
+          element={
+            <RequireAdmin>
+              <AdminApps />
             </RequireAdmin>
           }
         />

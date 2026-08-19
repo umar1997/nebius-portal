@@ -40,6 +40,15 @@ db.exec(`
     created_at  TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS user_app_permissions (
+    id      TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    app_id  TEXT NOT NULL,
+    UNIQUE(user_id, app_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (app_id)  REFERENCES apps(id)  ON DELETE CASCADE
+  );
 `);
 
 export default db;

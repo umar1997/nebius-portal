@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { X, Copy, Check, Loader2 } from 'lucide-react'
 import { clsx } from 'clsx'
-import { App, appsApi } from '../lib/api'
+import { App, appsApi, adminApi } from '../lib/api'
 import { toast } from '../stores/useToastStore'
 
 const WORKERS = ['worker-0', 'worker-1', 'worker-2', 'worker-3', 'worker-4', 'worker-5', 'worker-6', 'worker-7']
@@ -12,6 +12,7 @@ interface AddAppModalProps {
   app?: App | null
   onClose: () => void
   onSave: (app: App) => void
+  useAdminAuth?: boolean
 }
 
 interface FormState {
@@ -22,7 +23,7 @@ interface FormState {
   description: string
 }
 
-export default function AddAppModal({ app, onClose, onSave }: AddAppModalProps) {
+export default function AddAppModal({ app, onClose, onSave, useAdminAuth = false }: AddAppModalProps) {
   const isEdit = !!app
   const [form, setForm] = useState<FormState>({
     name: app?.name ?? '',
@@ -68,12 +69,16 @@ export default function AddAppModal({ app, onClose, onSave }: AddAppModalProps) 
       }
 
       if (isEdit && app) {
-        const res = await appsApi.update(app.id, payload)
+        const res = useAdminAuth
+          ? await adminApi.updateApp(app.id, payload)
+          : await appsApi.update(app.id, payload)
         toast.success('Application updated')
         onSave(res.app)
         onClose()
       } else {
-        const res = await appsApi.create(payload)
+        const res = useAdminAuth
+          ? await adminApi.createApp(payload)
+          : await appsApi.create(payload)
         toast.success('Application added')
         setSavedApp(res.app)
         onSave(res.app)
